@@ -23,7 +23,6 @@ Current working behavior already includes:
 - output targeting `~/.agents/skills/`
 
 What is still missing is standalone productization:
-- proper repo operating files in `mcpsmith`
 - better modular boundaries
 - real source-grounded dossiers
 - real installed-skill output format
@@ -38,7 +37,7 @@ Use one `jj` change per task family. Each task should be independently ownable b
 
 | ID | Status | Repo | Can Start | Depends On | Deliverable |
 |---|---|---|---:|---|---|
-| MS-00 | pending | `mcpsmith` | now | none | repo bootstrap files and agent instructions |
+| MS-00 | completed | `mcpsmith` | done | none | repo bootstrap files and agent instructions |
 | MS-01 | pending | `mcpsmith` | now | none | standalone public CLI/config surface freeze |
 | MS-02 | pending | `mcpsmith` | after MS-01 | MS-01 | internal module decomposition |
 | MS-03 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
@@ -98,12 +97,19 @@ Every screenshot must be paired with pane capture output.
 
 ## Task Specs
 
-### MS-00 [pending] Repo Bootstrap And Agent Context
+### MS-00 [completed] Repo Bootstrap And Agent Context
 Create the baseline operating files in `mcpsmith`:
 - `/Users/anicolae/code/mcpsmith/AGENTS.md`
 - `/Users/anicolae/code/mcpsmith/llms.txt`
 - `/Users/anicolae/code/mcpsmith/PLAN.md`
 - `/Users/anicolae/code/mcpsmith/Makefile` or `/Users/anicolae/code/mcpsmith/scripts/local-checks.sh`
+
+Completed on 2026-03-07 with:
+- `/Users/anicolae/code/mcpsmith/AGENTS.md`
+- `/Users/anicolae/code/mcpsmith/llms.txt`
+- `/Users/anicolae/code/mcpsmith/Makefile`
+- `/Users/anicolae/code/mcpsmith/scripts/local-checks.sh`
+- bootstrap coverage in `/Users/anicolae/code/mcpsmith/tests/repo_bootstrap.rs`
 
 `AGENTS.md` must include:
 - what `mcpsmith` does
