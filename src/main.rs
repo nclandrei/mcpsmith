@@ -18,10 +18,10 @@ Stepwise flow:
 
 Backend selection is backend-agnostic:
   1) explicit --backend if provided
-  2) config convert.backend_preference when available
+  2) config backend.preference when available
   3) auto-detect installed backend (codex, then claude)
 
-Use --backend-health to print backend diagnostics.
+Use --backend, --backend-auto, and --backend-health for one-shot conversion or discover.
 Use --allow-side-effects, --probe-timeout-seconds, and --probe-retries to control runtime probes.
 Use --config <path> to include extra MCP config files.
 ";
@@ -41,22 +41,22 @@ struct Cli {
     #[arg(long = "skills-dir", value_name = "PATH")]
     skills_dir: Option<PathBuf>,
     /// Force backend selection to codex or claude
-    #[arg(long, value_parser = ["codex", "claude"])]
+    #[arg(long, value_parser = ["codex", "claude"], requires = "server")]
     backend: Option<String>,
     /// Enable backend auto-detect/fallback mode
-    #[arg(long)]
+    #[arg(long, requires = "server")]
     backend_auto: bool,
     /// Print backend availability diagnostics
-    #[arg(long)]
+    #[arg(long, requires = "server")]
     backend_health: bool,
     /// Allow executing explicit side-effectful probes during contract testing
-    #[arg(long, global = true)]
+    #[arg(long, requires = "server")]
     allow_side_effects: bool,
     /// Runtime probe timeout in seconds
-    #[arg(long = "probe-timeout-seconds", value_name = "N", global = true)]
+    #[arg(long = "probe-timeout-seconds", value_name = "N", requires = "server")]
     probe_timeout_seconds: Option<u64>,
     /// Number of retries for failed runtime probes
-    #[arg(long = "probe-retries", value_name = "N", global = true)]
+    #[arg(long = "probe-retries", value_name = "N", requires = "server")]
     probe_retries: Option<u32>,
     #[command(subcommand)]
     command: Option<Commands>,
@@ -80,6 +80,15 @@ enum Commands {
         /// Additional MCP config file paths to inspect
         #[arg(long = "config", value_name = "PATH")]
         config: Vec<PathBuf>,
+        /// Force backend selection to codex or claude
+        #[arg(long, value_parser = ["codex", "claude"])]
+        backend: Option<String>,
+        /// Enable backend auto-detect/fallback mode
+        #[arg(long)]
+        backend_auto: bool,
+        /// Print backend availability diagnostics
+        #[arg(long)]
+        backend_health: bool,
     },
     /// Build skill files from an existing dossier JSON
     Build {
@@ -104,6 +113,15 @@ enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+        /// Allow executing explicit side-effectful probes during contract testing
+        #[arg(long)]
+        allow_side_effects: bool,
+        /// Runtime probe timeout in seconds
+        #[arg(long = "probe-timeout-seconds", value_name = "N")]
+        probe_timeout_seconds: Option<u64>,
+        /// Number of retries for failed runtime probes
+        #[arg(long = "probe-retries", value_name = "N")]
+        probe_retries: Option<u32>,
     },
     /// Apply a fully passing dossier: write skills and remove MCP config entry
     Apply {
@@ -119,6 +137,15 @@ enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+        /// Allow executing explicit side-effectful probes during contract testing
+        #[arg(long)]
+        allow_side_effects: bool,
+        /// Runtime probe timeout in seconds
+        #[arg(long = "probe-timeout-seconds", value_name = "N")]
+        probe_timeout_seconds: Option<u64>,
+        /// Number of retries for failed runtime probes
+        #[arg(long = "probe-retries", value_name = "N")]
+        probe_retries: Option<u32>,
     },
     /// List discovered MCP servers
     List {
@@ -133,23 +160,6 @@ enum Commands {
     Inspect {
         /// Server id (source:name) or unique server name
         server: String,
-        /// Emit machine-readable JSON output
-        #[arg(long)]
-        json: bool,
-        /// Additional MCP config file paths to inspect
-        #[arg(long = "config", value_name = "PATH")]
-        config: Vec<PathBuf>,
-    },
-    /// Generate a conversion plan for one MCP server
-    Plan {
-        /// Server id (source:name) or unique server name
-        server: String,
-        /// Planning mode (auto resolves from recommendation)
-        #[arg(long, default_value = "auto", value_parser = ["auto", "hybrid", "replace"])]
-        mode: String,
-        /// Explicit no-op apply guard (planning only)
-        #[arg(long)]
-        dry_run: bool,
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
@@ -184,6 +194,9 @@ fn main() -> anyhow::Result<()> {
             json,
             out,
             config,
+            backend,
+            backend_auto,
+            backend_health,
         }) => {
             commands::convert::run_discover_v3(
                 server.as_deref(),
@@ -191,9 +204,9 @@ fn main() -> anyhow::Result<()> {
                 json,
                 out,
                 &config,
-                cli.backend.as_deref(),
-                cli.backend_auto,
-                cli.backend_health,
+                backend.as_deref(),
+                backend_auto,
+                backend_health,
                 &app_config,
             )?;
         }
@@ -202,27 +215,23 @@ fn main() -> anyhow::Result<()> {
             skills_dir,
             json,
         }) => {
-            commands::convert::run_build_v3(
-                &from_dossier,
-                skills_dir,
-                json,
-                cli.backend_health,
-                &app_config,
-            )?;
+            commands::convert::run_build_v3(&from_dossier, skills_dir, json)?;
         }
         Some(Commands::ContractTest {
             from_dossier,
             report,
             json,
+            allow_side_effects,
+            probe_timeout_seconds,
+            probe_retries,
         }) => {
             commands::convert::run_contract_test_v3(
                 &from_dossier,
                 report.as_deref(),
                 json,
-                cli.backend_health,
-                cli.allow_side_effects,
-                cli.probe_timeout_seconds,
-                cli.probe_retries,
+                allow_side_effects,
+                probe_timeout_seconds,
+                probe_retries,
                 &app_config,
             )?;
         }
@@ -231,16 +240,18 @@ fn main() -> anyhow::Result<()> {
             yes,
             skills_dir,
             json,
+            allow_side_effects,
+            probe_timeout_seconds,
+            probe_retries,
         }) => {
             commands::convert::run_apply_v3(
                 &from_dossier,
                 yes,
                 skills_dir,
                 json,
-                cli.backend_health,
-                cli.allow_side_effects,
-                cli.probe_timeout_seconds,
-                cli.probe_retries,
+                allow_side_effects,
+                probe_timeout_seconds,
+                probe_retries,
                 &app_config,
             )?;
         }
@@ -253,15 +264,6 @@ fn main() -> anyhow::Result<()> {
             config,
         }) => {
             commands::convert::run_inspect(&server, json, &config)?;
-        }
-        Some(Commands::Plan {
-            server,
-            mode,
-            dry_run,
-            json,
-            config,
-        }) => {
-            commands::convert::run_plan(&server, &mode, dry_run, json, &config)?;
         }
         Some(Commands::Verify {
             server,

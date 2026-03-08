@@ -3,20 +3,11 @@ use anyhow::{Result, bail};
 use mcpsmith_core as convert;
 use mcpsmith_core::{
     ContractTestOptions, ConvertBackendConfig, ConvertBackendHealthReport, ConvertBackendName,
-    ConvertBackendPreference, ConvertInventory, ConvertPlan, ConvertV3Options, ConvertVerifyReport,
-    MCPServerProfile, PlanMode,
+    ConvertBackendPreference, ConvertInventory, ConvertV3Options, ConvertVerifyReport,
+    MCPServerProfile,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-
-pub fn parse_mode(raw: &str) -> Result<PlanMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(PlanMode::Auto),
-        "hybrid" => Ok(PlanMode::Hybrid),
-        "replace" => Ok(PlanMode::Replace),
-        other => bail!("Unsupported mode '{other}'. Expected: auto, hybrid, replace."),
-    }
-}
 
 pub fn parse_backend(raw: &str) -> Result<ConvertBackendName> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -133,23 +124,10 @@ pub fn run_discover_v3(
     })
 }
 
-pub fn run_build_v3(
-    from_dossier: &Path,
-    skills_dir: Option<PathBuf>,
-    json: bool,
-    backend_health: bool,
-    app_config: &AppConfig,
-) -> Result<()> {
-    let backend_config = ConvertBackendConfig {
-        preference: map_backend_preference(&app_config.convert.backend_preference),
-        timeout_seconds: app_config.convert.backend_timeout_seconds,
-        chunk_size: app_config.convert.backend_chunk_size,
-    };
-    let health = maybe_backend_health(backend_health, &backend_config);
-
+pub fn run_build_v3(from_dossier: &Path, skills_dir: Option<PathBuf>, json: bool) -> Result<()> {
     let result = convert::build_from_dossier_path(from_dossier, skills_dir)?;
 
-    emit_with_optional_health(json, health.as_ref(), &result, || {
+    emit_with_optional_health(json, None, &result, || {
         print_build_result(&result);
     })
 }
@@ -159,19 +137,11 @@ pub fn run_contract_test_v3(
     from_dossier: &Path,
     report: Option<&Path>,
     json: bool,
-    backend_health: bool,
     allow_side_effects: bool,
     probe_timeout_seconds: Option<u64>,
     probe_retries: Option<u32>,
     app_config: &AppConfig,
 ) -> Result<()> {
-    let backend_config = ConvertBackendConfig {
-        preference: map_backend_preference(&app_config.convert.backend_preference),
-        timeout_seconds: app_config.convert.backend_timeout_seconds,
-        chunk_size: app_config.convert.backend_chunk_size,
-    };
-    let health = maybe_backend_health(backend_health, &backend_config);
-
     let contract_options = contract_test_options(
         app_config,
         allow_side_effects,
@@ -180,7 +150,7 @@ pub fn run_contract_test_v3(
     );
     let result = convert::contract_test_from_dossier_path(from_dossier, report, contract_options)?;
 
-    emit_with_optional_health(json, health.as_ref(), &result, || {
+    emit_with_optional_health(json, None, &result, || {
         print_contract_result(&result);
         if let Some(path) = report {
             println!("Contract-test report: {}", path.display());
@@ -194,19 +164,11 @@ pub fn run_apply_v3(
     yes: bool,
     skills_dir: Option<PathBuf>,
     json: bool,
-    backend_health: bool,
     allow_side_effects: bool,
     probe_timeout_seconds: Option<u64>,
     probe_retries: Option<u32>,
     app_config: &AppConfig,
 ) -> Result<()> {
-    let backend_config = ConvertBackendConfig {
-        preference: map_backend_preference(&app_config.convert.backend_preference),
-        timeout_seconds: app_config.convert.backend_timeout_seconds,
-        chunk_size: app_config.convert.backend_chunk_size,
-    };
-    let health = maybe_backend_health(backend_health, &backend_config);
-
     let contract_options = contract_test_options(
         app_config,
         allow_side_effects,
@@ -215,7 +177,7 @@ pub fn run_apply_v3(
     );
     let result = convert::apply_from_dossier_path(from_dossier, yes, skills_dir, contract_options)?;
 
-    emit_with_optional_health(json, health.as_ref(), &result, || {
+    emit_with_optional_health(json, None, &result, || {
         print_apply_v3_result(&result);
     })
 }
@@ -293,25 +255,6 @@ pub fn run_inspect(selector: &str, json: bool, config_paths: &[PathBuf]) -> Resu
     }
 
     print_server(&server);
-    Ok(())
-}
-
-pub fn run_plan(
-    selector: &str,
-    mode_raw: &str,
-    dry_run: bool,
-    json: bool,
-    config_paths: &[PathBuf],
-) -> Result<()> {
-    let mode = parse_mode(mode_raw)?;
-    let plan = convert::plan(selector, mode, config_paths)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&plan)?);
-        return Ok(());
-    }
-
-    print_plan(&plan, dry_run);
     Ok(())
 }
 
@@ -499,36 +442,6 @@ fn print_server(server: &MCPServerProfile) {
     println!("  Why                 : {}", server.recommendation_reason);
 }
 
-fn print_plan(plan: &ConvertPlan, dry_run: bool) {
-    println!("Plan for {}", plan.server.id);
-    println!("  requested_mode : {}", plan.requested_mode);
-    println!("  recommended    : {}", plan.recommended_mode);
-    println!("  effective_mode : {}", plan.effective_mode);
-    println!("  blocked        : {}", plan.blocked);
-
-    if dry_run {
-        println!("  dry_run        : true (no files were changed)");
-    }
-
-    println!("Actions:");
-    for action in &plan.actions {
-        println!("  - {action}");
-    }
-
-    if !plan.warnings.is_empty() {
-        println!("Warnings:");
-        for warning in &plan.warnings {
-            println!("  - {warning}");
-        }
-    }
-
-    if plan.blocked {
-        println!(
-            "Apply step is blocked for this plan. Use hybrid mode or adjust server scope before replace."
-        );
-    }
-}
-
 fn print_verify_report(report: &ConvertVerifyReport) {
     println!("Verification for {}", report.server.id);
     println!("  passed               : {}", report.passed);
@@ -576,14 +489,6 @@ fn display_option(value: &Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_mode() {
-        assert_eq!(parse_mode("auto").unwrap(), PlanMode::Auto);
-        assert_eq!(parse_mode("hybrid").unwrap(), PlanMode::Hybrid);
-        assert_eq!(parse_mode("replace").unwrap(), PlanMode::Replace);
-        assert!(parse_mode("invalid").is_err());
-    }
 
     #[test]
     fn test_parse_backend() {

@@ -177,6 +177,7 @@ Completed on 2026-03-08 with:
 - legacy `convert.*` keys kept as input-only compatibility
 - backend flags scoped to one-shot and `discover`
 - probe flags scoped to one-shot, `contract-test`, and `apply`
+- follow-up CLI cleanup in `/Users/anicolae/code/mcpsmith/.workspaces/ms-04` removed the lingering public `plan` help entry, corrected root help to reference `backend.preference`, and removed probe flags from `discover --help`
 
 ### MS-02 [completed] Internal Module Decomposition
 Split `crates/mcpsmith-core` into explicit modules:

@@ -9,6 +9,37 @@ fn mcpsmith_cmd(home: &Path) -> Command {
 }
 
 #[test]
+fn test_mcpsmith_root_help_hides_plan_and_uses_standalone_config_wording() {
+    let dir = tempfile::tempdir().unwrap();
+
+    mcpsmith_cmd(dir.path())
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  plan").not())
+        .stdout(predicate::str::contains(
+            "config backend.preference when available",
+        ))
+        .stdout(predicate::str::contains("config convert.backend_preference").not());
+}
+
+#[test]
+fn test_mcpsmith_discover_help_scopes_backend_flags_without_probe_flags() {
+    let dir = tempfile::tempdir().unwrap();
+
+    mcpsmith_cmd(dir.path())
+        .args(["discover", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--backend <BACKEND>"))
+        .stdout(predicate::str::contains("--backend-auto"))
+        .stdout(predicate::str::contains("--backend-health"))
+        .stdout(predicate::str::contains("--allow-side-effects").not())
+        .stdout(predicate::str::contains("--probe-timeout-seconds").not())
+        .stdout(predicate::str::contains("--probe-retries").not());
+}
+
+#[test]
 fn test_mcpsmith_discover_build_contract_apply() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("settings.json");
