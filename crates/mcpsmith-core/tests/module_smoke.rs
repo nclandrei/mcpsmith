@@ -1,9 +1,9 @@
 use chrono::Utc;
 use mcpsmith_core::{
     ConversionRecommendation, DossierBundle, MCPServerProfile, PermissionLevel, PlanMode,
-    ProbeInputSource, ProbeInputs, RuntimeTool, ServerDossier, ServerGate, ToolContractTest,
-    ToolDossier, build_from_bundle, build_from_dossier_path, discover, inspect,
-    load_dossier_bundle, plan, write_dossier_bundle,
+    ProbeInputSource, ProbeInputs, RuntimeTool, ServerDossier, ServerGate, SourceGrounding,
+    SourceKind, ToolContractTest, ToolDossier, build_from_bundle, build_from_dossier_path,
+    discover, inspect, load_dossier_bundle, plan, write_dossier_bundle,
 };
 use serde_json::json;
 use std::fs;
@@ -28,6 +28,7 @@ fn sample_server(root: &Path) -> MCPServerProfile {
         inferred_permission: PermissionLevel::ReadOnly,
         recommendation: ConversionRecommendation::ReplaceCandidate,
         recommendation_reason: "read-only".to_string(),
+        source_grounding: SourceGrounding::default(),
     }
 }
 
@@ -76,11 +77,11 @@ fn sample_bundle(root: &Path) -> DossierBundle {
     };
 
     DossierBundle {
-        format_version: 4,
+        format_version: 5,
         generated_at: Utc::now(),
         dossiers: vec![ServerDossier {
             generated_at: Utc::now(),
-            format_version: 4,
+            format_version: 5,
             server,
             runtime_tools: vec![runtime_tool],
             tool_dossiers: vec![tool_dossier],
@@ -175,4 +176,60 @@ fn inventory_and_plan_still_resolve_servers_after_module_split() {
     assert!(!conversion_plan.blocked);
     assert_eq!(conversion_plan.recommended_mode, PlanMode::Replace);
     assert_eq!(conversion_plan.effective_mode, PlanMode::Replace);
+}
+
+#[test]
+fn discover_reports_source_grounding_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool_root = dir.path().join("local-tool");
+    let bin_dir = tool_root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let executable = bin_dir.join("server.sh");
+    std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(
+        tool_root.join("package.json"),
+        r#"{
+  "name": "@acme/local-mcp",
+  "version": "1.2.3",
+  "homepage": "https://example.com/local-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acme/local-mcp"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let config_path = dir.path().join("mcp.json");
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "mcpServers": {{
+    "playwright": {{
+      "command": "{}",
+      "readOnly": true
+    }}
+  }}
+}}"#,
+            executable.display()
+        ),
+    )
+    .unwrap();
+
+    let inventory = discover(&[config_path]).unwrap();
+    let server = inventory
+        .servers
+        .iter()
+        .find(|server| server.name == "playwright")
+        .unwrap();
+    assert_eq!(server.source_grounding.kind, SourceKind::LocalPath);
+    assert_eq!(
+        server.source_grounding.package_name.as_deref(),
+        Some("@acme/local-mcp")
+    );
+    assert_eq!(
+        server.source_grounding.repository_url.as_deref(),
+        Some("https://github.com/acme/local-mcp")
+    );
 }

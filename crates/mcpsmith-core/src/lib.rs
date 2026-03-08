@@ -26,7 +26,7 @@ pub use dossier::{
 pub use inventory::{discover, inspect, plan};
 pub use skillset::build_from_bundle;
 
-const DOSSIER_FORMAT_VERSION: u32 = 4;
+const DOSSIER_FORMAT_VERSION: u32 = 5;
 const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 90;
 const DEFAULT_BACKEND_CHUNK_SIZE: usize = 8;
 const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
@@ -100,6 +100,72 @@ pub struct ApplyOptions {
     pub enrichment_agent: Option<EnrichmentAgent>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Unknown,
+    LocalPath,
+    NpmPackage,
+    PypiPackage,
+    RepositoryUrl,
+    RemoteUrl,
+}
+
+impl std::fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceKind::Unknown => write!(f, "unknown"),
+            SourceKind::LocalPath => write!(f, "local-path"),
+            SourceKind::NpmPackage => write!(f, "npm-package"),
+            SourceKind::PypiPackage => write!(f, "pypi-package"),
+            SourceKind::RepositoryUrl => write!(f, "repository-url"),
+            SourceKind::RemoteUrl => write!(f, "remote-url"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceEvidenceLevel {
+    #[default]
+    RuntimeOnly,
+    ConfigOnly,
+    SourceInspected,
+}
+
+impl std::fmt::Display for SourceEvidenceLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceEvidenceLevel::RuntimeOnly => write!(f, "runtime-only"),
+            SourceEvidenceLevel::ConfigOnly => write!(f, "config-only"),
+            SourceEvidenceLevel::SourceInspected => write!(f, "source-inspected"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SourceGrounding {
+    #[serde(default)]
+    pub kind: SourceKind,
+    #[serde(default)]
+    pub evidence_level: SourceEvidenceLevel,
+    #[serde(default)]
+    pub inspected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspected_paths: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MCPServerProfile {
     pub id: String,
@@ -116,6 +182,8 @@ pub struct MCPServerProfile {
     pub inferred_permission: PermissionLevel,
     pub recommendation: ConversionRecommendation,
     pub recommendation_reason: String,
+    #[serde(default)]
+    pub source_grounding: SourceGrounding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

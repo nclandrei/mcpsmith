@@ -5,7 +5,7 @@ use crate::skillset::{build_from_bundle, normalize_tool_name};
 use crate::{
     BackendContext, BuildResult, ConvertInventory, ConvertV3Options, DOSSIER_FORMAT_VERSION,
     DossierBundle, MCPServerProfile, PermissionLevel, ProbeInputSource, ProbeInputs, RuntimeTool,
-    ServerDossier, ServerGate, ToolContractTest, ToolDossier,
+    ServerDossier, ServerGate, SourceEvidenceLevel, ToolContractTest, ToolDossier,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -238,6 +238,8 @@ fn discover_server_dossier(
             .remove(name)
             .unwrap_or_else(|| fallback_tool_dossier(server, runtime_map.get(name).unwrap()));
         normalize_contract_tests(&mut dossier, server);
+        let runtime_tool = runtime_map.get(name).unwrap();
+        dossier.evidence = merge_source_grounding_evidence(dossier.evidence, server, runtime_tool);
         if dossier.recipe.is_empty() {
             gate_reasons.push(format!("Tool '{}' has no executable recipe.", name));
         }
@@ -284,9 +286,6 @@ pub(crate) fn fallback_tool_dossier(
     server: &MCPServerProfile,
     runtime_tool: &RuntimeTool,
 ) -> ToolDossier {
-    let mut evidence = source_ground_evidence(server, runtime_tool);
-    evidence.push("fallback: runtime metadata + deterministic defaults".to_string());
-
     ToolDossier {
         name: normalize_tool_name(&runtime_tool.name),
         explanation: runtime_tool.description.clone().unwrap_or_else(|| {
@@ -300,7 +299,11 @@ pub(crate) fn fallback_tool_dossier(
             "Run the tool once with deterministic arguments and capture raw output.".to_string(),
             "Validate status/output shape and return concise structured result.".to_string(),
         ],
-        evidence,
+        evidence: merge_source_grounding_evidence(
+            vec!["fallback: runtime metadata + deterministic defaults".to_string()],
+            server,
+            runtime_tool,
+        ),
         confidence: 0.5,
         contract_tests: default_contract_tests(server),
         probe_inputs: ProbeInputs::default(),
@@ -308,11 +311,25 @@ pub(crate) fn fallback_tool_dossier(
     }
 }
 
+pub(crate) fn merge_source_grounding_evidence(
+    mut evidence: Vec<String>,
+    server: &MCPServerProfile,
+    runtime_tool: &RuntimeTool,
+) -> Vec<String> {
+    evidence.extend(source_ground_evidence(server, runtime_tool));
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
 pub(crate) fn source_ground_evidence(
     server: &MCPServerProfile,
     runtime_tool: &RuntimeTool,
 ) -> Vec<String> {
-    let mut evidence = vec![];
+    let mut evidence = vec![format!(
+        "evidence-level: {}",
+        server.source_grounding.evidence_level
+    )];
 
     if let Some(url) = &server.url {
         evidence.push(format!("runtime-url: {url}"));
@@ -331,16 +348,31 @@ pub(crate) fn source_ground_evidence(
         evidence.push(format!("runtime-tool-description: {description}"));
     }
 
-    for arg in &server.args {
-        if arg.contains("github.com") {
-            evidence.push(format!("source-candidate: {arg}"));
-        }
-        if arg.contains('/') && !arg.starts_with('-') {
-            evidence.push(format!("package-candidate: {arg}"));
+    if let Some(entrypoint) = &server.source_grounding.entrypoint {
+        evidence.push(format!("source-entrypoint: {}", entrypoint.display()));
+    }
+
+    if let Some(package_name) = &server.source_grounding.package_name {
+        if let Some(package_version) = &server.source_grounding.package_version {
+            evidence.push(format!("source-package: {package_name}@{package_version}"));
+        } else {
+            evidence.push(format!("source-package: {package_name}"));
         }
     }
 
-    if evidence.is_empty() {
+    if let Some(homepage) = &server.source_grounding.homepage {
+        evidence.push(format!("source-homepage: {homepage}"));
+    }
+
+    if let Some(repository_url) = &server.source_grounding.repository_url {
+        evidence.push(format!("source-repository-url: {repository_url}"));
+    }
+
+    for path in &server.source_grounding.inspected_paths {
+        evidence.push(format!("source-inspected-path: {}", path.display()));
+    }
+
+    if server.source_grounding.evidence_level == SourceEvidenceLevel::RuntimeOnly {
         evidence.push("runtime metadata + contract test fallback".to_string());
     }
 
@@ -441,4 +473,120 @@ pub(crate) fn has_any_probe_inputs(probe_inputs: &ProbeInputs) -> bool {
     probe_inputs.happy_path.is_some()
         || probe_inputs.invalid_input.is_some()
         || probe_inputs.side_effect_safety.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConversionRecommendation;
+
+    #[test]
+    fn source_ground_evidence_includes_source_metadata_and_level() {
+        let server = MCPServerProfile {
+            id: "fixture:playwright".to_string(),
+            name: "playwright".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Browser automation".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@playwright/mcp@1.55.0".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 1,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "read-only".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::ConfigOnly,
+                inspected: false,
+                entrypoint: None,
+                package_name: Some("@playwright/mcp".to_string()),
+                package_version: Some("1.55.0".to_string()),
+                homepage: Some("https://playwright.dev".to_string()),
+                repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
+                inspected_paths: vec![],
+            },
+        };
+        let tool = RuntimeTool {
+            name: "navigate".to_string(),
+            description: Some("Open pages".to_string()),
+            input_schema: None,
+        };
+
+        let evidence = source_ground_evidence(&server, &tool);
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item == "evidence-level: config-only")
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item == "source-package: @playwright/mcp@1.55.0")
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item == "source-homepage: https://playwright.dev")
+        );
+    }
+
+    #[test]
+    fn merge_source_grounding_evidence_preserves_backend_and_source_items() {
+        let server = MCPServerProfile {
+            id: "fixture:playwright".to_string(),
+            name: "playwright".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Browser automation".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@playwright/mcp@latest".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 1,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "read-only".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::ConfigOnly,
+                inspected: false,
+                entrypoint: None,
+                package_name: Some("@playwright/mcp".to_string()),
+                package_version: Some("latest".to_string()),
+                homepage: None,
+                repository_url: None,
+                inspected_paths: vec![],
+            },
+        };
+        let tool = RuntimeTool {
+            name: "navigate".to_string(),
+            description: None,
+            input_schema: None,
+        };
+
+        let merged = merge_source_grounding_evidence(
+            vec!["backend-summary: navigate".to_string()],
+            &server,
+            &tool,
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|item| item == "backend-summary: navigate")
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|item| item == "evidence-level: config-only")
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|item| item == "source-package: @playwright/mcp@latest")
+        );
+    }
 }

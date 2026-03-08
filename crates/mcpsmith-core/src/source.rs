@@ -1,5 +1,6 @@
 use crate::{
     ConfigSource, ConversionRecommendation, ConvertInventory, MCPServerProfile, PermissionLevel,
+    SourceEvidenceLevel, SourceGrounding, SourceKind,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -92,6 +93,13 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
                 &env_keys,
                 declared_tool_count,
             );
+            let source_grounding = resolve_source_grounding(
+                &source.path,
+                obj,
+                command.as_deref(),
+                &args,
+                url.as_deref(),
+            );
 
             servers.push(MCPServerProfile {
                 id: format!("{}:{}", source.label, name),
@@ -108,6 +116,7 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
                 inferred_permission,
                 recommendation,
                 recommendation_reason,
+                source_grounding,
             });
         }
     }
@@ -273,6 +282,389 @@ fn declared_tool_count(obj: &serde_json::Map<String, Value>) -> usize {
         }
     }
     0
+}
+
+fn resolve_source_grounding(
+    source_path: &Path,
+    obj: &serde_json::Map<String, Value>,
+    command: Option<&str>,
+    args: &[String],
+    url: Option<&str>,
+) -> SourceGrounding {
+    let mut grounding = SourceGrounding {
+        homepage: explicit_homepage(obj),
+        repository_url: explicit_repository_url(obj),
+        ..SourceGrounding::default()
+    };
+
+    if let Some(command) = command {
+        if let Some(entrypoint) = resolve_local_command_path(source_path, command) {
+            grounding.kind = SourceKind::LocalPath;
+            grounding.entrypoint = Some(entrypoint.clone());
+            inspect_local_source(&entrypoint, &mut grounding);
+            return finalize_source_grounding(grounding);
+        }
+
+        if let Some((package_name, package_version)) = resolve_npm_package_spec(command, args) {
+            grounding.kind = SourceKind::NpmPackage;
+            grounding.package_name = Some(package_name.clone());
+            grounding.package_version = package_version;
+            inspect_local_node_package(source_path, &package_name, &mut grounding);
+            return finalize_source_grounding(grounding);
+        }
+
+        if let Some((package_name, package_version)) = resolve_pypi_package_spec(command, args) {
+            grounding.kind = SourceKind::PypiPackage;
+            grounding.package_name = Some(package_name);
+            grounding.package_version = package_version;
+            inspect_local_pyproject(source_path, &mut grounding);
+            return finalize_source_grounding(grounding);
+        }
+    }
+
+    grounding.kind = if grounding.repository_url.is_some() {
+        SourceKind::RepositoryUrl
+    } else if url.is_some() {
+        SourceKind::RemoteUrl
+    } else {
+        SourceKind::Unknown
+    };
+
+    finalize_source_grounding(grounding)
+}
+
+fn explicit_homepage(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    ["homepage", "website"]
+        .iter()
+        .find_map(|key| json_string(obj.get(*key)))
+}
+
+fn explicit_repository_url(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    [
+        "repository",
+        "repo",
+        "repositoryUrl",
+        "repository_url",
+        "source",
+        "sourceUrl",
+    ]
+    .iter()
+    .find_map(|key| repository_value_to_url(obj.get(*key)?))
+}
+
+fn json_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn repository_value_to_url(value: &Value) -> Option<String> {
+    json_string(Some(value)).or_else(|| {
+        value.as_object().and_then(|obj| {
+            ["url", "href", "web"]
+                .iter()
+                .find_map(|key| json_string(obj.get(*key)))
+        })
+    })
+}
+
+fn resolve_local_command_path(source_path: &Path, command: &str) -> Option<PathBuf> {
+    let looks_like_path =
+        command.starts_with('.') || command.contains('/') || command.contains('\\');
+    if !looks_like_path && !Path::new(command).is_absolute() {
+        return None;
+    }
+
+    let path = Path::new(command);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        source_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    };
+
+    Some(std::fs::canonicalize(&resolved).ok().unwrap_or(resolved))
+}
+
+fn inspect_local_source(entrypoint: &Path, grounding: &mut SourceGrounding) {
+    if entrypoint.exists() {
+        grounding.inspected = true;
+        grounding.inspected_paths.push(entrypoint.to_path_buf());
+    }
+
+    let Some(start_dir) = entrypoint.parent() else {
+        return;
+    };
+
+    if let Some(package_json) = find_upwards(start_dir, "package.json", 6) {
+        merge_package_json_metadata(grounding, &package_json);
+    }
+    if let Some(pyproject) = find_upwards(start_dir, "pyproject.toml", 6) {
+        merge_pyproject_metadata(grounding, &pyproject);
+    }
+}
+
+fn inspect_local_node_package(
+    source_path: &Path,
+    package_name: &str,
+    grounding: &mut SourceGrounding,
+) {
+    let Some(start_dir) = source_path.parent() else {
+        return;
+    };
+
+    for dir in start_dir.ancestors().take(6) {
+        let candidate = dir
+            .join("node_modules")
+            .join(package_name)
+            .join("package.json");
+        if candidate.exists() {
+            merge_package_json_metadata(grounding, &candidate);
+            break;
+        }
+    }
+}
+
+fn inspect_local_pyproject(source_path: &Path, grounding: &mut SourceGrounding) {
+    let Some(start_dir) = source_path.parent() else {
+        return;
+    };
+
+    if let Some(pyproject) = find_upwards(start_dir, "pyproject.toml", 6) {
+        merge_pyproject_metadata(grounding, &pyproject);
+    }
+}
+
+fn find_upwards(start_dir: &Path, file_name: &str, max_levels: usize) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .take(max_levels)
+        .map(|dir| dir.join(file_name))
+        .find(|candidate| candidate.exists())
+}
+
+fn merge_package_json_metadata(grounding: &mut SourceGrounding, path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let Some(obj) = root.as_object() else {
+        return;
+    };
+
+    grounding.inspected = true;
+    grounding.inspected_paths.push(path.to_path_buf());
+    if grounding.package_name.is_none() {
+        grounding.package_name = json_string(obj.get("name"));
+    }
+    if grounding.package_version.is_none() {
+        grounding.package_version = json_string(obj.get("version"));
+    }
+    if grounding.homepage.is_none() {
+        grounding.homepage = json_string(obj.get("homepage"));
+    }
+    if grounding.repository_url.is_none() {
+        grounding.repository_url = obj
+            .get("repository")
+            .and_then(repository_value_to_url)
+            .or_else(|| json_string(obj.get("repositoryUrl")));
+    }
+}
+
+fn merge_pyproject_metadata(grounding: &mut SourceGrounding, path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(root) = toml::from_str::<toml::Value>(&raw) else {
+        return;
+    };
+
+    grounding.inspected = true;
+    grounding.inspected_paths.push(path.to_path_buf());
+
+    if let Some(project) = root.get("project").and_then(toml::Value::as_table) {
+        if grounding.package_name.is_none() {
+            grounding.package_name = toml_string(project.get("name"));
+        }
+        if grounding.package_version.is_none() {
+            grounding.package_version = toml_string(project.get("version"));
+        }
+        if let Some(urls) = project.get("urls").and_then(toml::Value::as_table) {
+            if grounding.homepage.is_none() {
+                grounding.homepage =
+                    toml_string(urls.get("Homepage")).or_else(|| toml_string(urls.get("homepage")));
+            }
+            if grounding.repository_url.is_none() {
+                grounding.repository_url = toml_string(urls.get("Repository"))
+                    .or_else(|| toml_string(urls.get("repository")));
+            }
+        }
+    }
+
+    if let Some(poetry) = root
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(toml::Value::as_table)
+    {
+        if grounding.package_name.is_none() {
+            grounding.package_name = toml_string(poetry.get("name"));
+        }
+        if grounding.package_version.is_none() {
+            grounding.package_version = toml_string(poetry.get("version"));
+        }
+        if grounding.homepage.is_none() {
+            grounding.homepage = toml_string(poetry.get("homepage"));
+        }
+        if grounding.repository_url.is_none() {
+            grounding.repository_url = toml_string(poetry.get("repository"));
+        }
+    }
+}
+
+fn toml_string(value: Option<&toml::Value>) -> Option<String> {
+    value
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn resolve_npm_package_spec(command: &str, args: &[String]) -> Option<(String, Option<String>)> {
+    let command = command_basename(command);
+    if command != "npx" && command != "npm" {
+        return None;
+    }
+
+    let mut index = 0usize;
+    if args.first().map(String::as_str) == Some("exec") {
+        index = 1;
+    }
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-y" | "--yes" | "--quiet" => {
+                index += 1;
+            }
+            "-p" | "--package" => {
+                return args
+                    .get(index + 1)
+                    .and_then(|value| parse_npm_package_spec(value));
+            }
+            value if value.starts_with('-') => {
+                index += 1;
+            }
+            value => return parse_npm_package_spec(value),
+        }
+    }
+
+    None
+}
+
+fn parse_npm_package_spec(spec: &str) -> Option<(String, Option<String>)> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() || trimmed.starts_with('.') || trimmed.starts_with('/') {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("npm:") {
+        return parse_npm_package_spec(rest);
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix('@') {
+        if let Some(split_at) = stripped.rfind('@').map(|index| index + 1) {
+            let name = &trimmed[..split_at];
+            let version = trimmed[split_at + 1..].trim();
+            if !version.is_empty() {
+                return Some((name.to_string(), Some(version.to_string())));
+            }
+        }
+        return Some((trimmed.to_string(), None));
+    }
+
+    if let Some((name, version)) = trimmed.rsplit_once('@')
+        && !name.is_empty()
+        && !version.trim().is_empty()
+    {
+        return Some((name.to_string(), Some(version.trim().to_string())));
+    }
+
+    Some((trimmed.to_string(), None))
+}
+
+fn resolve_pypi_package_spec(command: &str, args: &[String]) -> Option<(String, Option<String>)> {
+    if command_basename(command) != "uvx" {
+        return None;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--from") {
+        return args
+            .get(index + 1)
+            .and_then(|value| parse_pypi_package_spec(value));
+    }
+
+    args.iter()
+        .find(|arg| !arg.starts_with('-'))
+        .and_then(|value| parse_pypi_package_spec(value))
+}
+
+fn parse_pypi_package_spec(spec: &str) -> Option<(String, Option<String>)> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() || trimmed.starts_with('.') || trimmed.starts_with('/') {
+        return None;
+    }
+
+    let (name, version) = if let Some((name, version)) = trimmed.split_once("==") {
+        (name, Some(version))
+    } else {
+        (trimmed, None)
+    };
+
+    let name = name.split('[').next().unwrap_or(name).trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((
+        name.to_string(),
+        version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+    ))
+}
+
+fn command_basename(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command)
+}
+
+fn finalize_source_grounding(mut grounding: SourceGrounding) -> SourceGrounding {
+    grounding.inspected_paths.sort();
+    grounding.inspected_paths.dedup();
+
+    grounding.evidence_level = if grounding.inspected {
+        SourceEvidenceLevel::SourceInspected
+    } else if grounding.kind != SourceKind::Unknown
+        || grounding.entrypoint.is_some()
+        || grounding.package_name.is_some()
+        || grounding.homepage.is_some()
+        || grounding.repository_url.is_some()
+    {
+        SourceEvidenceLevel::ConfigOnly
+    } else {
+        SourceEvidenceLevel::RuntimeOnly
+    };
+
+    grounding
 }
 
 fn collect_permission_hints(obj: &serde_json::Map<String, Value>) -> Vec<String> {
@@ -507,4 +899,141 @@ fn recommend_conversion(
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_resolves_npx_package_source_grounding() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@1.55.0"],
+      "homepage": "https://playwright.dev",
+      "repository": "https://github.com/microsoft/playwright-mcp"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::NpmPackage);
+        assert_eq!(
+            server.source_grounding.evidence_level,
+            SourceEvidenceLevel::ConfigOnly
+        );
+        assert_eq!(
+            server.source_grounding.package_name.as_deref(),
+            Some("@playwright/mcp")
+        );
+        assert_eq!(
+            server.source_grounding.package_version.as_deref(),
+            Some("1.55.0")
+        );
+    }
+
+    #[test]
+    fn discover_resolves_uvx_package_source_grounding() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "mcpServers": {
+    "memory": {
+      "command": "uvx",
+      "args": ["--from", "acme-memory-mcp==0.4.1", "memory-mcp-server"],
+      "repository": "https://github.com/acme/memory-mcp"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::PypiPackage);
+        assert_eq!(
+            server.source_grounding.package_name.as_deref(),
+            Some("acme-memory-mcp")
+        );
+        assert_eq!(
+            server.source_grounding.package_version.as_deref(),
+            Some("0.4.1")
+        );
+    }
+
+    #[test]
+    fn discover_inspects_local_executable_source_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_root = dir.path().join("local-tool");
+        let bin_dir = tool_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let executable = bin_dir.join("server.sh");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            tool_root.join("package.json"),
+            r#"{
+  "name": "@acme/local-mcp",
+  "version": "1.2.3",
+  "homepage": "https://example.com/local-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acme/local-mcp"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{
+  "mcpServers": {{
+    "local-tool": {{
+      "command": "{}",
+      "description": "Local MCP"
+    }}
+  }}
+}}"#,
+                executable.display()
+            ),
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::LocalPath);
+        assert_eq!(
+            server.source_grounding.evidence_level,
+            SourceEvidenceLevel::SourceInspected
+        );
+        assert!(server.source_grounding.inspected);
+        assert_eq!(
+            server.source_grounding.package_name.as_deref(),
+            Some("@acme/local-mcp")
+        );
+    }
 }

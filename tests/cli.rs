@@ -214,6 +214,82 @@ fn test_mcpsmith_apply_rolls_back_installed_skill_dirs_when_config_entry_is_miss
 }
 
 #[test]
+fn test_mcpsmith_discover_records_source_grounding_in_dossier() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("settings.json");
+    let dossier_path = dir.path().join("dossier.json");
+    let tool_root = dir.path().join("local-tool");
+    let bin_dir = tool_root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let mock_mcp = bin_dir.join("mock-mcp.sh");
+    let mock_codex = dir.path().join("mock-codex.sh");
+    write_mock_mcp_script(&mock_mcp, &["navigate"]);
+    write_mock_codex_script_for(&mock_codex, &["navigate"]);
+    std::fs::write(
+        tool_root.join("package.json"),
+        r#"{
+  "name": "@acme/local-mcp",
+  "version": "1.2.3",
+  "homepage": "https://example.com/local-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acme/local-mcp"
+  }
+}"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "mcpServers": {{
+    "playwright": {{
+      "command": "{}",
+      "description": "Read-only browser helpers"
+    }}
+  }}
+}}"#,
+            mock_mcp.display()
+        ),
+    )
+    .unwrap();
+
+    mcpsmith_cmd(dir.path())
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["discover", "playwright", "--json", "--out"])
+        .arg(&dossier_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    let dossier: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&dossier_path).unwrap()).unwrap();
+    let server = &dossier["dossiers"][0]["server"];
+    assert_eq!(server["source_grounding"]["kind"], "local-path");
+    assert_eq!(
+        server["source_grounding"]["package_name"],
+        "@acme/local-mcp"
+    );
+    assert_eq!(server["source_grounding"]["package_version"], "1.2.3");
+    assert_eq!(
+        server["source_grounding"]["repository_url"],
+        "https://github.com/acme/local-mcp"
+    );
+
+    let evidence = dossier["dossiers"][0]["tool_dossiers"][0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.as_str())
+        .collect::<Vec<_>>();
+    assert!(evidence.contains(&"evidence-level: source-inspected"));
+    assert!(evidence.contains(&"source-package: @acme/local-mcp@1.2.3"));
+    assert!(evidence.contains(&"source-homepage: https://example.com/local-mcp"));
+}
+
+#[test]
 fn test_mcpsmith_one_shot_works_with_claude_only() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("settings.json");

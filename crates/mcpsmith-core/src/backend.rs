@@ -1,4 +1,6 @@
-use crate::dossier::{default_contract_tests, has_any_probe_inputs, source_ground_evidence};
+use crate::dossier::{
+    default_contract_tests, has_any_probe_inputs, merge_source_grounding_evidence,
+};
 use crate::skillset::normalize_tool_name;
 use crate::{
     BackendContext, BackendHealthStatus, BackendSelection, ConvertBackendConfig,
@@ -301,6 +303,10 @@ pub(crate) fn generate_tool_dossiers(
 
     let mut out = vec![];
     for chunk in chunks {
+        let runtime_map = chunk
+            .iter()
+            .map(|tool| (normalize_tool_name(&tool.name), tool.clone()))
+            .collect::<BTreeMap<_, _>>();
         let prompt = build_tool_chunk_prompt(server, &chunk);
         let raw = backend.explain_tool_chunk(&prompt, &schema)?;
         let parsed = parse_backend_chunk_response(&raw)?;
@@ -317,14 +323,17 @@ pub(crate) fn generate_tool_dossiers(
             if dossier.contract_tests.is_empty() {
                 dossier.contract_tests = default_contract_tests(server);
             }
-            if dossier.evidence.is_empty() {
-                let runtime_tool = RuntimeTool {
-                    name: dossier.name.clone(),
-                    description: None,
-                    input_schema: None,
-                };
-                dossier.evidence = source_ground_evidence(server, &runtime_tool);
-            }
+            let runtime_tool =
+                runtime_map
+                    .get(&dossier.name)
+                    .cloned()
+                    .unwrap_or_else(|| RuntimeTool {
+                        name: dossier.name.clone(),
+                        description: None,
+                        input_schema: None,
+                    });
+            dossier.evidence =
+                merge_source_grounding_evidence(dossier.evidence, server, &runtime_tool);
             dossier.probe_input_source = if has_any_probe_inputs(&dossier.probe_inputs) {
                 ProbeInputSource::Backend
             } else {
@@ -338,6 +347,13 @@ pub(crate) fn generate_tool_dossiers(
 }
 
 fn build_tool_chunk_prompt(server: &MCPServerProfile, tools: &[RuntimeTool]) -> String {
+    let source_json = serde_json::to_string_pretty(&serde_json::json!({
+        "command": &server.command,
+        "args": &server.args,
+        "url": &server.url,
+        "source_grounding": &server.source_grounding,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
     let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_string());
     format!(
         "You are generating deterministic tool dossiers for MCP -> skill conversion.\n\
@@ -346,6 +362,8 @@ Do not invent tool names. Use names exactly from runtime_tools.\n\
 \n\
 Server name: {}\n\
 Server purpose: {}\n\
+Source grounding:\n{}\n\
+\n\
 Runtime tools:\n{}\n\
 \n\
 Requirements per tool:\n\
@@ -356,7 +374,7 @@ Requirements per tool:\n\
 - contract_tests must include probes: happy-path, invalid-input, side-effect-safety\n\
 - probe_inputs: optional deterministic request args for happy-path/invalid-input/side-effect-safety\n\
 - probe_input_source: backend if probe_inputs came from backend, otherwise synthesized\n",
-        server.name, server.purpose, tools_json
+        server.name, server.purpose, source_json, tools_json
     )
 }
 
@@ -918,4 +936,51 @@ fn extract_embedded_json(text: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ConversionRecommendation, PermissionLevel, SourceEvidenceLevel};
+
+    #[test]
+    fn build_tool_chunk_prompt_includes_source_grounding_summary() {
+        let server = MCPServerProfile {
+            id: "fixture:playwright".to_string(),
+            name: "playwright".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Browser automation".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@playwright/mcp@latest".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 1,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "read-only".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::ConfigOnly,
+                inspected: false,
+                entrypoint: None,
+                package_name: Some("@playwright/mcp".to_string()),
+                package_version: Some("latest".to_string()),
+                homepage: Some("https://playwright.dev".to_string()),
+                repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
+                inspected_paths: vec![],
+            },
+        };
+        let tools = vec![RuntimeTool {
+            name: "navigate".to_string(),
+            description: Some("Open pages".to_string()),
+            input_schema: None,
+        }];
+
+        let prompt = build_tool_chunk_prompt(&server, &tools);
+        assert!(prompt.contains("Source grounding"));
+        assert!(prompt.contains("@playwright/mcp"));
+        assert!(prompt.contains("https://github.com/microsoft/playwright-mcp"));
+    }
 }

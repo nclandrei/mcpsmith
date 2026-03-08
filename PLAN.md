@@ -40,7 +40,7 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | MS-00 | completed | `mcpsmith` | done | none | repo bootstrap files and agent instructions |
 | MS-01 | completed | `mcpsmith` | done | none | standalone public CLI/config surface freeze |
 | MS-02 | completed | `mcpsmith` | done | MS-01 | internal module decomposition |
-| MS-03 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
+| MS-03 | in progress | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
 | MS-04 | completed | `mcpsmith` | done | MS-01, MS-02 | real installed skill-pack output |
 | MS-05 | pending | `mcpsmith` | now for scaffold | MS-01 for final shape | reusable test harness and live MCP matrix |
 | MS-06 | pending | `mcpsmith` | after MS-01 | MS-00, MS-01 | docs, examples, AGENTS, llms |
@@ -216,7 +216,7 @@ Completed on 2026-03-08 with:
 - new public-API smoke coverage added in `crates/mcpsmith-core/tests/module_smoke.rs`
 - repo local checks tightened to `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` so subcrate tests are verified by default
 
-### MS-03 [pending] Source-Grounded Dossier Pipeline
+### MS-03 [in progress] Source-Grounded Dossier Pipeline
 Add real source grounding before or during dossier generation:
 - resolve executable/package source from MCP config
 - support:
@@ -237,6 +237,20 @@ When source is reachable:
 When source is not reachable:
 - fallback to runtime metadata + runtime contract tests only
 - mark evidence level clearly
+
+Progress:
+- discovery now records structured `source_grounding` for:
+  - local executable/path entrypoints
+  - `npx`/npm package specs
+  - `uvx`/PyPI package specs
+  - explicit homepage/repository metadata when present
+- local source inspection now reads nearby `package.json` / `pyproject.toml` metadata when available
+- dossier generation now injects source grounding into backend prompts and merges source-derived evidence into each tool dossier
+- tests now cover source resolvers, prompt grounding, evidence merge, and discover JSON output
+
+Remaining:
+- broader remote package/repository inspection beyond config and locally reachable manifests
+- any follow-on refactor needed once MS-04 or later work expands source inspection breadth
 
 Done when:
 - dossier quality is driven by runtime truth plus source grounding where possible
