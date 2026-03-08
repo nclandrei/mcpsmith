@@ -38,8 +38,8 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | ID | Status | Repo | Can Start | Depends On | Deliverable |
 |---|---|---|---:|---|---|
 | MS-00 | completed | `mcpsmith` | done | none | repo bootstrap files and agent instructions |
-| MS-01 | pending | `mcpsmith` | now | none | standalone public CLI/config surface freeze |
-| MS-02 | pending | `mcpsmith` | after MS-01 | MS-01 | internal module decomposition |
+| MS-01 | completed | `mcpsmith` | done | none | standalone public CLI/config surface freeze |
+| MS-02 | completed | `mcpsmith` | done | MS-01 | internal module decomposition |
 | MS-03 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
 | MS-04 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | real installed skill-pack output |
 | MS-05 | pending | `mcpsmith` | now for scaffold | MS-01 for final shape | reusable test harness and live MCP matrix |
@@ -54,8 +54,8 @@ Use one `jj` change per task family. Each task should be independently ownable b
 - Keep commits task-scoped and direct on `main` if that remains the repo policy.
 - For every user-visible CLI or output change, run:
   - `cargo fmt --all`
-  - `cargo clippy --all-targets -- -D warnings`
-  - `cargo test`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
 - For every user-visible CLI change, also verify with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) using Ghostty + tmux.
 - All MCP/config verification must use isolated state:
   - `HOME="$TMPDIR/..."`
@@ -133,7 +133,7 @@ Add `.codex-runtime/` to `.gitignore`.
 Done when:
 - a new agent can open `mcpsmith` and work without needing `distill` context
 
-### MS-01 [pending] Standalone Public Surface Freeze
+### MS-01 [completed] Standalone Public Surface Freeze
 Lock the v1 standalone interface:
 - primary commands:
   - `mcpsmith <server>`
@@ -170,7 +170,15 @@ CLI cleanup:
 Done when:
 - `mcpsmith --help` reads like a product, not an extracted subcommand tree
 
-### MS-02 [pending] Internal Module Decomposition
+Completed on 2026-03-08 with:
+- public CLI limited to `mcpsmith <server>`, `discover`, `build`, `contract-test`, `apply`, plus diagnostics `list`, `inspect`, `verify`
+- public `plan` removed from help/dispatch
+- canonical config keys switched to `backend.*` and `probe.*`
+- legacy `convert.*` keys kept as input-only compatibility
+- backend flags scoped to one-shot and `discover`
+- probe flags scoped to one-shot, `contract-test`, and `apply`
+
+### MS-02 [completed] Internal Module Decomposition
 Split `crates/mcpsmith-core` into explicit modules:
 - `inventory`
 - `runtime`
@@ -191,6 +199,21 @@ Keep external behavior frozen to MS-01.
 
 Done when:
 - separate agents can own modules with minimal conflict risk
+
+Completed on 2026-03-08 with:
+- `crates/mcpsmith-core/src/lib.rs` reduced to shared types and public re-exports
+- `crates/mcpsmith-core/src/inventory.rs`
+- `crates/mcpsmith-core/src/runtime.rs`
+- `crates/mcpsmith-core/src/backend.rs`
+- `crates/mcpsmith-core/src/dossier.rs`
+- `crates/mcpsmith-core/src/source.rs`
+- `crates/mcpsmith-core/src/skillset.rs`
+- `crates/mcpsmith-core/src/contract.rs`
+- `crates/mcpsmith-core/src/apply.rs`
+- `crates/mcpsmith-core/src/diagnostics.rs`
+- inherited monolith `crates/mcpsmith-core/src/v3.rs` removed
+- new public-API smoke coverage added in `crates/mcpsmith-core/tests/module_smoke.rs`
+- repo local checks tightened to `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` so subcrate tests are verified by default
 
 ### MS-03 [pending] Source-Grounded Dossier Pipeline
 Add real source grounding before or during dossier generation:

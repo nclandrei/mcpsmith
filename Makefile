@@ -7,8 +7,8 @@ help:
 	  'Targets:' \
 	  '  make fmt               Run cargo fmt --all' \
 	  '  make fmt-check         Run cargo fmt --all --check' \
-	  '  make clippy            Run cargo clippy --all-targets -- -D warnings' \
-	  '  make test              Run cargo test' \
+	  '  make clippy            Run cargo clippy --workspace --all-targets -- -D warnings' \
+	  '  make test              Run cargo test --workspace' \
 	  '  make check             Run fmt-check, clippy, and test' \
 	  '  make local-checks      Run scripts/local-checks.sh' \
 	  '  make local-checks-fix  Run scripts/local-checks.sh --fix'
@@ -20,10 +20,10 @@ fmt-check:
 	cargo fmt --all --check
 
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 test:
-	cargo test
+	cargo test --workspace
 
 check: fmt-check clippy test
 

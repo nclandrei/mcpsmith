@@ -82,6 +82,6 @@ fn local_checks_script_exposes_fix_mode() {
 
     assert!(script.contains("Usage: scripts/local-checks.sh [--fix]"));
     assert!(script.contains("cargo fmt --all --check"));
-    assert!(script.contains("cargo clippy --all-targets -- -D warnings"));
-    assert!(script.contains("cargo test"));
+    assert!(script.contains("cargo clippy --workspace --all-targets -- -D warnings"));
+    assert!(script.contains("cargo test --workspace"));
 }

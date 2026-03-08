@@ -44,8 +44,8 @@ else
   cargo fmt --all --check
 fi
 
-echo "+ cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets -- -D warnings
+echo "+ cargo clippy --workspace --all-targets -- -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings
 
-echo "+ cargo test"
-cargo test
+echo "+ cargo test --workspace"
+cargo test --workspace
