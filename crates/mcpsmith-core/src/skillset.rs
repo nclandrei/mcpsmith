@@ -43,19 +43,31 @@ pub(crate) fn write_server_skills(
     root: &Path,
 ) -> Result<(PathBuf, Vec<PathBuf>, Vec<String>)> {
     let server_slug = sanitize_slug(&dossier.server.name);
-    let orchestrator_path = root.join(format!("{server_slug}.md"));
+    let orchestrator_dir = root.join(&server_slug);
+    let orchestrator_path = orchestrator_dir.join("SKILL.md");
+    fs::create_dir_all(&orchestrator_dir)
+        .with_context(|| format!("Failed to create {}", orchestrator_dir.display()))?;
 
     let mut tool_skill_paths = vec![];
     let mut tool_refs = vec![];
+    let mut manifest_tool_skills = vec![];
     for tool in &dossier.tool_dossiers {
         let tool_slug = sanitize_slug(&tool.name);
-        let file_name = format!("{server_slug}--{tool_slug}.md");
-        let path = root.join(&file_name);
+        let dir_name = format!("{server_slug}--{tool_slug}");
+        let path = root.join(&dir_name).join("SKILL.md");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
         let body = render_tool_skill_markdown(dossier, tool);
         fs::write(&path, body)
             .with_context(|| format!("Failed to write tool skill {}", path.display()))?;
         tool_skill_paths.push(path.clone());
-        tool_refs.push((tool.name.clone(), file_name));
+        tool_refs.push((tool.name.clone(), format!("../{dir_name}/SKILL.md")));
+        manifest_tool_skills.push(ManifestToolSkill {
+            tool_name: normalize_tool_name(&tool.name),
+            skill_file: format!("../{dir_name}/SKILL.md"),
+        });
     }
 
     let orchestrator = render_orchestrator_v3_markdown(dossier, &tool_refs);
@@ -66,10 +78,27 @@ pub(crate) fn write_server_skills(
         )
     })?;
 
+    let manifest = SkillParityManifest {
+        format_version: 2,
+        generated_at: Utc::now(),
+        server_id: dossier.server.id.clone(),
+        server_name: dossier.server.name.clone(),
+        orchestrator_skill: Some("SKILL.md".to_string()),
+        required_tools: dossier
+            .tool_dossiers
+            .iter()
+            .map(|tool| normalize_tool_name(&tool.name))
+            .collect(),
+        tool_skills: manifest_tool_skills,
+        required_tool_hints: vec![],
+    };
+    write_skill_manifest(&orchestrator_path, &manifest)?;
+
     let mut notes = vec![format!(
         "Generated 1 orchestrator skill and {} tool skills.",
         tool_skill_paths.len()
     )];
+    notes.push("Wrote internal parity manifest for verify checks.".to_string());
     if dossier.backend_fallback_used {
         notes.push("Backend fallback was used during dossier discovery.".to_string());
     }
@@ -90,7 +119,7 @@ fn render_orchestrator_v3_markdown(
         out.push_str("- No tool skills available.\n\n");
     } else {
         for (tool, file) in tool_refs {
-            let skill_name = file.trim_end_matches(".md");
+            let skill_name = installed_skill_reference_name(file);
             out.push_str(&format!("- `${skill_name}` for `{tool}`.\n"));
         }
         out.push('\n');
@@ -183,7 +212,7 @@ pub(crate) fn render_orchestrator_skill_markdown(
         out.push_str("- No capability skills were generated.\n\n");
     } else {
         for skill in tool_skills {
-            let skill_name = skill.skill_file.trim_end_matches(".md");
+            let skill_name = installed_skill_reference_name(&skill.skill_file);
             out.push_str(&format!(
                 "- `${skill_name}`: Executes `{}` operations.\n",
                 skill.tool_name
@@ -533,6 +562,13 @@ pub(crate) fn manifest_path_for_skill(skill_path: &Path) -> Result<PathBuf> {
     let parent = skill_path
         .parent()
         .context("Skill path has no parent directory for manifest")?;
+    if skill_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value == "SKILL.md")
+    {
+        return Ok(parent.join(".mcpsmith").join("manifest.json"));
+    }
     let stem = skill_path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -583,6 +619,25 @@ pub(crate) fn default_agents_skills_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     home.join(".agents").join("skills")
+}
+
+fn installed_skill_reference_name(reference: &str) -> String {
+    let trimmed = reference.trim_end_matches('/');
+    if trimmed.ends_with("/SKILL.md") {
+        return Path::new(trimmed)
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or("skill")
+            .to_string();
+    }
+
+    trimmed
+        .trim_end_matches(".md")
+        .rsplit('/')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 fn tool_hint_prefix(server: &MCPServerProfile) -> String {

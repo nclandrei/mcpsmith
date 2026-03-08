@@ -112,6 +112,26 @@ fn dossier_roundtrip_builds_skills_after_module_split() {
     assert!(build.servers[0].orchestrator_skill_path.exists());
     assert_eq!(build.servers[0].tool_skill_paths.len(), 1);
     assert!(build.servers[0].tool_skill_paths[0].exists());
+    assert_eq!(
+        build.servers[0].orchestrator_skill_path,
+        dir.path().join("skills").join("memory").join("SKILL.md")
+    );
+    assert_eq!(
+        build.servers[0].tool_skill_paths[0],
+        dir.path()
+            .join("skills")
+            .join("memory--read-graph")
+            .join("SKILL.md")
+    );
+    assert!(
+        dir.path()
+            .join("skills")
+            .join("memory")
+            .join(".mcpsmith")
+            .join("manifest.json")
+            .exists()
+    );
+    assert!(!dir.path().join("skills").join("memory.md").exists());
 
     let build_from_path =
         build_from_dossier_path(&dossier_path, Some(skills_dir_from_path)).unwrap();

@@ -17,7 +17,14 @@ pub fn verify(
 ) -> Result<ConvertVerifyReport> {
     let server = inspect(server_selector, additional_paths)?;
     let skills_dir = skills_dir.unwrap_or_else(default_skills_dir);
-    let skill_path = skills_dir.join(format!("mcp-{}.md", sanitize_slug(&server.name)));
+    let server_slug = sanitize_slug(&server.name);
+    let installed_skill_path = skills_dir.join(&server_slug).join("SKILL.md");
+    let legacy_skill_path = skills_dir.join(format!("mcp-{server_slug}.md"));
+    let skill_path = if installed_skill_path.exists() || !legacy_skill_path.exists() {
+        installed_skill_path
+    } else {
+        legacy_skill_path
+    };
 
     let introspected = introspect_tools(&server).ok();
     verify_with_server_and_path(&server, &skill_path, introspected.as_deref())

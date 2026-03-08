@@ -56,6 +56,15 @@ fn test_mcpsmith_discover_build_contract_apply() {
         .success();
 
     mcpsmith_cmd(dir.path())
+        .args(["verify", "playwright", "--json", "--config"])
+        .arg(&config_path)
+        .args(["--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"));
+
+    mcpsmith_cmd(dir.path())
         .args(["contract-test", "--from-dossier"])
         .arg(&dossier_path)
         .args(["--report"])
@@ -76,8 +85,22 @@ fn test_mcpsmith_discover_build_contract_apply() {
 
     let updated = std::fs::read_to_string(&config_path).unwrap();
     assert!(!updated.contains("playwright"));
-    assert!(skills_dir.join("playwright.md").exists());
-    assert!(skills_dir.join("playwright--execute.md").exists());
+    assert!(skills_dir.join("playwright").join("SKILL.md").exists());
+    assert!(
+        skills_dir
+            .join("playwright--execute")
+            .join("SKILL.md")
+            .exists()
+    );
+    assert!(
+        skills_dir
+            .join("playwright")
+            .join(".mcpsmith")
+            .join("manifest.json")
+            .exists()
+    );
+    assert!(!skills_dir.join("playwright.md").exists());
+    assert!(!skills_dir.join("playwright--execute.md").exists());
     assert!(report_path.exists());
 
     let backup_count = std::fs::read_dir(dir.path())
@@ -91,6 +114,72 @@ fn test_mcpsmith_discover_build_contract_apply() {
         })
         .count();
     assert_eq!(backup_count, 1);
+}
+
+#[test]
+fn test_mcpsmith_apply_rolls_back_installed_skill_dirs_when_config_entry_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("settings.json");
+    let dossier_path = dir.path().join("dossier.json");
+    let skills_dir = dir.path().join("skills");
+    let mock_mcp = dir.path().join("mock-mcp.sh");
+    let mock_codex = dir.path().join("mock-codex.sh");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "mcpServers": {{
+    "playwright": {{
+      "command": "{}",
+      "description": "Read-only browser helpers",
+      "readOnly": true
+    }}
+  }}
+}}"#,
+            mock_mcp.display()
+        ),
+    )
+    .unwrap();
+
+    mcpsmith_cmd(dir.path())
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["discover", "playwright", "--out"])
+        .arg(&dossier_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    std::fs::write(&config_path, r#"{ "mcpServers": {} }"#).unwrap();
+
+    mcpsmith_cmd(dir.path())
+        .args(["apply", "--from-dossier"])
+        .arg(&dossier_path)
+        .args(["--yes", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Rolled back generated skills to keep conversion atomic.",
+        ));
+
+    assert!(!skills_dir.join("playwright").exists());
+    assert!(!skills_dir.join("playwright--execute").exists());
+
+    let backup_count = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.bak-")
+        })
+        .count();
+    assert_eq!(backup_count, 0);
 }
 
 #[test]
@@ -134,7 +223,14 @@ fn test_mcpsmith_one_shot_works_with_claude_only() {
 
     let updated = std::fs::read_to_string(&config_path).unwrap();
     assert!(!updated.contains("playwright"));
-    assert!(skills_dir.join("playwright.md").exists());
+    assert!(skills_dir.join("playwright").join("SKILL.md").exists());
+    assert!(
+        skills_dir
+            .join("playwright")
+            .join(".mcpsmith")
+            .join("manifest.json")
+            .exists()
+    );
 }
 
 #[test]

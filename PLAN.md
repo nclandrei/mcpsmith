@@ -41,7 +41,7 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | MS-01 | completed | `mcpsmith` | done | none | standalone public CLI/config surface freeze |
 | MS-02 | completed | `mcpsmith` | done | MS-01 | internal module decomposition |
 | MS-03 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
-| MS-04 | pending | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | real installed skill-pack output |
+| MS-04 | completed | `mcpsmith` | done | MS-01, MS-02 | real installed skill-pack output |
 | MS-05 | pending | `mcpsmith` | now for scaffold | MS-01 for final shape | reusable test harness and live MCP matrix |
 | MS-06 | pending | `mcpsmith` | after MS-01 | MS-00, MS-01 | docs, examples, AGENTS, llms |
 | MS-07 | pending | `mcpsmith` | after MS-00 | MS-00, MS-05, MS-06 | CI and release readiness |
@@ -240,7 +240,7 @@ When source is not reachable:
 Done when:
 - dossier quality is driven by runtime truth plus source grounding where possible
 
-### MS-04 [pending] Real Skill-Pack Output
+### MS-04 [completed] Real Skill-Pack Output
 Generate real installed skill directories under `~/.agents/skills/`:
 - orchestrator:
   - `~/.agents/skills/<server-slug>/SKILL.md`
@@ -267,6 +267,15 @@ Rules:
 
 Done when:
 - output is directly usable by agents as installed skills
+
+Completed on 2026-03-08 with:
+- orchestrator output moved to installed skill directories like `~/.agents/skills/<server-slug>/SKILL.md`
+- per-tool capability output moved to installed skill directories like `~/.agents/skills/<server-slug>--<tool-slug>/SKILL.md`
+- internal parity manifest moved under the orchestrator directory at `~/.agents/skills/<server-slug>/.mcpsmith/manifest.json`
+- `verify` updated to prefer installed-skill layout while keeping legacy flat-file fallback for existing outputs
+- `build` and one-shot apply now emit clean installed skill text while tracking runtime parity through the hidden manifest
+- atomic apply rollback coverage added so failed MCP config mutation removes the installed skill directories again
+- CLI coverage updated in `tests/cli.rs` and module smoke coverage updated in `crates/mcpsmith-core/tests/module_smoke.rs`
 
 ### MS-05 [pending] Test Harness And Live MCP Matrix
 Extract reusable mock MCP helpers into shared test support.

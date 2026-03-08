@@ -117,6 +117,13 @@ pub fn apply_with_options(
     };
 
     let server_slug = sanitize_slug(&conversion_plan.server.name);
+    let orchestrator_dir = skills_dir.join(&server_slug);
+    std::fs::create_dir_all(&orchestrator_dir).with_context(|| {
+        format!(
+            "Failed to create orchestrator skill dir {}",
+            orchestrator_dir.display()
+        )
+    })?;
     let mut slug_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut tool_skills = Vec::new();
     let mut tool_skill_paths = Vec::new();
@@ -130,8 +137,12 @@ pub fn apply_with_options(
         };
         *counter += 1;
 
-        let file_name = format!("mcp-{server_slug}-tool-{tool_slug}.md");
-        let skill_path = skills_dir.join(&file_name);
+        let dir_name = format!("{server_slug}--{tool_slug}");
+        let skill_path = skills_dir.join(&dir_name).join("SKILL.md");
+        if let Some(parent) = skill_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
         let description = spec_by_name
             .get(tool_name)
             .and_then(|item| item.description.as_deref());
@@ -147,13 +158,13 @@ pub fn apply_with_options(
         .with_context(|| format!("Failed to write capability skill {}", skill_path.display()))?;
         tool_skills.push(ManifestToolSkill {
             tool_name: tool_name.clone(),
-            skill_file: file_name,
+            skill_file: format!("../{dir_name}/SKILL.md"),
         });
         tool_skill_paths.push(skill_path);
     }
 
-    let orchestrator_filename = format!("mcp-{server_slug}.md");
-    let skill_path = skills_dir.join(&orchestrator_filename);
+    let orchestrator_filename = "SKILL.md".to_string();
+    let skill_path = orchestrator_dir.join(&orchestrator_filename);
     std::fs::write(
         &skill_path,
         render_orchestrator_skill_markdown(&conversion_plan, &tool_skills),
@@ -353,8 +364,15 @@ pub fn apply_from_bundle(
 fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[PathBuf]) {
     for path in tool_paths {
         let _ = fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
     }
     let _ = fs::remove_file(orchestrator);
+    if let Some(parent) = orchestrator.parent() {
+        let _ = fs::remove_dir_all(parent.join(".mcpsmith"));
+        let _ = fs::remove_dir(parent);
+    }
 }
 
 fn remove_server_from_config(path: &Path, server_name: &str) -> Result<(Option<PathBuf>, bool)> {
