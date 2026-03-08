@@ -1,2 +1,4 @@
 /target
 .codex-runtime/
+
+.workspaces/
