@@ -18,6 +18,13 @@ fn repo_bootstrap_files_exist() {
         "llms.txt",
         "Makefile",
         "scripts/local-checks.sh",
+        "scripts/smoke/common.sh",
+        "scripts/smoke/mock_fixture_flow.sh",
+        "scripts/smoke/live_public_mcp.sh",
+        "scripts/smoke/cli_verify_smoke.sh",
+        "tests/fixtures/live/memory-smoke.dossier.json",
+        "tests/fixtures/live/chrome-devtools-smoke.dossier.json",
+        "tests/fixtures/live/xcodebuildmcp-smoke.dossier.json",
     ] {
         assert!(repo_root().join(path).is_file(), "missing {path}");
     }
@@ -71,9 +78,19 @@ fn makefile_and_gitignore_reference_local_checks_state() {
 fn local_checks_script_is_executable() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = repo_root().join("scripts/local-checks.sh");
-    let mode = fs::metadata(path).unwrap().permissions().mode();
-    assert_ne!(mode & 0o111, 0, "scripts/local-checks.sh is not executable");
+    for path in [
+        "scripts/local-checks.sh",
+        "scripts/smoke/common.sh",
+        "scripts/smoke/mock_fixture_flow.sh",
+        "scripts/smoke/live_public_mcp.sh",
+        "scripts/smoke/cli_verify_smoke.sh",
+    ] {
+        let mode = fs::metadata(repo_root().join(path))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "{path} is not executable");
+    }
 }
 
 #[test]

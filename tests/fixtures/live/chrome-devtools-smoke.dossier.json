@@ -1,0 +1,88 @@
+{
+  "format_version": 5,
+  "generated_at": "2026-03-09T00:00:00Z",
+  "dossiers": [
+    {
+      "generated_at": "2026-03-09T00:00:00Z",
+      "format_version": 5,
+      "server": {
+        "id": "custom-1:chrome-devtools",
+        "name": "chrome-devtools",
+        "source_label": "custom-1",
+        "source_path": "__CONFIG_PATH__",
+        "purpose": "Browser inspection and debugging workflows",
+        "command": "npx",
+        "args": [
+          "-y",
+          "chrome-devtools-mcp@latest"
+        ],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": [],
+        "inferred_permission": "write",
+        "recommendation": "hybrid",
+        "recommendation_reason": "Stateful browser workflows stay hybrid in live smoke.",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false,
+          "package_name": "chrome-devtools-mcp"
+        }
+      },
+      "runtime_tools": [
+        {
+          "name": "list_pages",
+          "description": "Get a list of pages  open in the browser.",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tool_dossiers": [
+        {
+          "name": "list_pages",
+          "explanation": "List the currently open browser pages without mutating browser state.",
+          "recipe": [
+            "Run the tool with an empty object.",
+            "Inspect the returned page list."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9,
+          "contract_tests": [
+            {
+              "probe": "happy-path",
+              "expected": "Returns a page list.",
+              "method": "Run with an empty object.",
+              "applicable": true
+            },
+            {
+              "probe": "invalid-input",
+              "expected": "Rejects malformed input.",
+              "method": "Run with a non-object payload.",
+              "applicable": true
+            },
+            {
+              "probe": "side-effect-safety",
+              "expected": "Read-only smoke fixture.",
+              "method": "Skip for read-only smoke fixture.",
+              "applicable": false
+            }
+          ],
+          "probe_inputs": {
+            "happy_path": {}
+          },
+          "probe_input_source": "backend"
+        }
+      ],
+      "server_gate": "ready",
+      "gate_reasons": [],
+      "backend_used": "fixture",
+      "backend_fallback_used": false,
+      "backend_diagnostics": []
+    }
+  ]
+}

@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -191,7 +191,7 @@ fn execute_mcp_tool_probe_once(
         message: "Failed to open MCP stdout.".to_string(),
         response_preview: None,
     })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| ProbeFailure {
+    let _stderr = child.stderr.take().ok_or_else(|| ProbeFailure {
         kind: ProbeErrorKind::Transport,
         message: "Failed to open MCP stderr.".to_string(),
         response_preview: None,
@@ -306,9 +306,9 @@ fn execute_mcp_tool_probe_once(
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
-    let _ = reader_handle.join();
-    let mut stderr_text = String::new();
-    let _ = stderr.read_to_string(&mut stderr_text);
+    // Some MCP servers spawn descendants that inherit stdout. Joining the
+    // reader thread can then block even after the direct child has exited.
+    drop(reader_handle);
     let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
     let response_preview = clipped_preview(&value_to_compact_json(&response), 260);

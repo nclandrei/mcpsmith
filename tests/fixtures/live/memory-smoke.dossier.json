@@ -1,0 +1,90 @@
+{
+  "format_version": 5,
+  "generated_at": "2026-03-09T00:00:00Z",
+  "dossiers": [
+    {
+      "generated_at": "2026-03-09T00:00:00Z",
+      "format_version": 5,
+      "server": {
+        "id": "custom-1:memory",
+        "name": "memory",
+        "source_label": "custom-1",
+        "source_path": "__CONFIG_PATH__",
+        "purpose": "Memory and knowledge graph workflows",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-memory"
+        ],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": [
+          "read-only"
+        ],
+        "inferred_permission": "read-only",
+        "recommendation": "replace-candidate",
+        "recommendation_reason": "Read-only live smoke fixture.",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false,
+          "package_name": "@modelcontextprotocol/server-memory"
+        }
+      },
+      "runtime_tools": [
+        {
+          "name": "read_graph",
+          "description": "Read the entire knowledge graph",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tool_dossiers": [
+        {
+          "name": "read_graph",
+          "explanation": "Read the graph state and inspect the returned entities and relations.",
+          "recipe": [
+            "Run the tool with an empty object.",
+            "Inspect the returned graph payload."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9,
+          "contract_tests": [
+            {
+              "probe": "happy-path",
+              "expected": "Returns graph content.",
+              "method": "Run with an empty object.",
+              "applicable": true
+            },
+            {
+              "probe": "invalid-input",
+              "expected": "Rejects malformed input.",
+              "method": "Run with a non-object payload.",
+              "applicable": true
+            },
+            {
+              "probe": "side-effect-safety",
+              "expected": "Read-only smoke fixture.",
+              "method": "Skip for read-only smoke fixture.",
+              "applicable": false
+            }
+          ],
+          "probe_inputs": {
+            "happy_path": {}
+          },
+          "probe_input_source": "backend"
+        }
+      ],
+      "server_gate": "ready",
+      "gate_reasons": [],
+      "backend_used": "fixture",
+      "backend_fallback_used": false,
+      "backend_diagnostics": []
+    }
+  ]
+}
