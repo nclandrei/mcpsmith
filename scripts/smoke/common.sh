@@ -169,12 +169,12 @@ smoke_write_mock_codex_script() {
   shift
   local confidence="${1:-0.9}"
   shift || true
-  local dossiers=()
+  local workflows=()
   for name in "$@"; do
-    dossiers+=("{\"name\":\"$name\",\"explanation\":\"Run $name\",\"recipe\":[\"validate input\",\"execute $name\",\"verify output\"],\"evidence\":[\"runtime metadata\"],\"confidence\":${confidence},\"contract_tests\":[{\"probe\":\"happy-path\",\"expected\":\"valid output\",\"method\":\"run valid request\",\"applicable\":true},{\"probe\":\"invalid-input\",\"expected\":\"returns validation error\",\"method\":\"run malformed request\",\"applicable\":true},{\"probe\":\"side-effect-safety\",\"expected\":\"requires confirmation for mutations\",\"method\":\"run check/dry-run first\",\"applicable\":true}]}")
+    workflows+=("{\"id\":\"$name\",\"title\":\"$name workflow\",\"goal\":\"Perform $name operations without relying on the MCP server.\",\"when_to_use\":\"Use this when you need to run the $name workflow with native commands.\",\"trigger_phrases\":[\"run $name\",\"use $name\"],\"origin_tools\":[\"$name\"],\"stop_and_ask\":[\"Stop if the required inputs are ambiguous or the native command would mutate state unexpectedly.\"],\"native_steps\":[{\"title\":\"Run the native command\",\"command\":\"printf '%s\\\\n' 'collected query goes here'\",\"details\":\"Replace 'collected query goes here' with the exact collected query value before running the command.\"}],\"verification\":[\"Confirm the native command completed successfully and produced output.\"],\"return_contract\":[\"Return the command output together with the exact query value used.\"],\"confidence\":${confidence}}")
   done
   local payload
-  payload="$(IFS=,; printf '%s' "${dossiers[*]}")"
+  payload="$(IFS=,; printf '%s' "${workflows[*]}")"
   cat >"$path" <<EOF
 #!/bin/sh
 if [ "\$1" = "--version" ] || [ "\$1" = "-v" ] || [ "\$1" = "version" ]; then
@@ -196,7 +196,7 @@ done
 cat >/dev/null
 [ -n "\$last_message_file" ] || exit 12
 cat >"\$last_message_file" <<'JSON'
-{"tool_dossiers":[${payload}]}
+{"workflow_skills":[${payload}]}
 JSON
 EOF
   chmod +x "$path"
@@ -205,13 +205,13 @@ EOF
 smoke_write_mock_claude_script() {
   local path="$1"
   shift
-  local dossiers=()
+  local workflows=()
   local name
   for name in "$@"; do
-    dossiers+=("{\"name\":\"$name\",\"explanation\":\"Run $name\",\"recipe\":[\"validate input\",\"execute $name\",\"verify output\"],\"evidence\":[\"runtime metadata\"],\"confidence\":0.85,\"contract_tests\":[{\"probe\":\"happy-path\",\"expected\":\"valid output\",\"method\":\"run valid request\",\"applicable\":true},{\"probe\":\"invalid-input\",\"expected\":\"returns validation error\",\"method\":\"run malformed request\",\"applicable\":true},{\"probe\":\"side-effect-safety\",\"expected\":\"requires confirmation for mutations\",\"method\":\"run check/dry-run first\",\"applicable\":true}]}")
+    workflows+=("{\"id\":\"$name\",\"title\":\"$name workflow\",\"goal\":\"Perform $name operations without relying on the MCP server.\",\"when_to_use\":\"Use this when you need to run the $name workflow with native commands.\",\"trigger_phrases\":[\"run $name\",\"use $name\"],\"origin_tools\":[\"$name\"],\"stop_and_ask\":[\"Stop if the required inputs are ambiguous or the native command would mutate state unexpectedly.\"],\"native_steps\":[{\"title\":\"Run the native command\",\"command\":\"printf '%s\\\\n' 'collected query goes here'\",\"details\":\"Replace 'collected query goes here' with the exact collected query value before running the command.\"}],\"verification\":[\"Confirm the native command completed successfully and produced output.\"],\"return_contract\":[\"Return the command output together with the exact query value used.\"],\"confidence\":0.85}")
   done
   local payload
-  payload="$(IFS=,; printf '%s' "${dossiers[*]}")"
+  payload="$(IFS=,; printf '%s' "${workflows[*]}")"
   cat >"$path" <<EOF
 #!/bin/sh
 if [ "\$1" = "--version" ] || [ "\$1" = "-v" ] || [ "\$1" = "version" ]; then
@@ -220,7 +220,7 @@ if [ "\$1" = "--version" ] || [ "\$1" = "-v" ] || [ "\$1" = "version" ]; then
 fi
 cat >/dev/null
 cat <<'JSON'
-{"tool_dossiers":[${payload}]}
+{"workflow_skills":[${payload}]}
 JSON
 EOF
   chmod +x "$path"

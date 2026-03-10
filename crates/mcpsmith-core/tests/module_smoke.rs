@@ -1,9 +1,10 @@
 use chrono::Utc;
 use mcpsmith_core::{
     ConversionRecommendation, DossierBundle, MCPServerProfile, PermissionLevel, PlanMode,
-    ProbeInputSource, ProbeInputs, RuntimeTool, ServerDossier, ServerGate, SourceGrounding,
-    SourceKind, ToolContractTest, ToolDossier, build_from_bundle, build_from_dossier_path,
-    discover, inspect, load_dossier_bundle, plan, write_dossier_bundle,
+    ProbeInputSource, ProbeInputs, RuntimeTool, RuntimeValidationSpec, ServerDossier, ServerGate,
+    SourceGrounding, SourceKind, ToolContractTest, WorkflowContextInput, WorkflowSkillSpec,
+    build_from_bundle, build_from_dossier_path, discover, inspect, load_dossier_bundle, plan,
+    write_dossier_bundle,
 };
 use serde_json::json;
 use std::fs;
@@ -42,38 +43,77 @@ fn sample_bundle(root: &Path) -> DossierBundle {
             "properties": {}
         })),
     };
-    let tool_dossier = ToolDossier {
-        name: "read_graph".to_string(),
-        explanation: "Read the memory graph.".to_string(),
-        recipe: vec![
-            "Validate graph selection inputs.".to_string(),
-            "Run the tool and capture the returned graph.".to_string(),
-            "Summarize entities and relations.".to_string(),
-        ],
-        evidence: vec!["runtime metadata".to_string()],
-        confidence: 0.9,
-        contract_tests: vec![
-            ToolContractTest {
-                probe: "happy-path".to_string(),
-                expected: "Returns graph content.".to_string(),
-                method: "Run with valid input.".to_string(),
-                applicable: true,
-            },
-            ToolContractTest {
-                probe: "invalid-input".to_string(),
-                expected: "Returns a validation error.".to_string(),
-                method: "Run with malformed input.".to_string(),
-                applicable: true,
-            },
-            ToolContractTest {
-                probe: "side-effect-safety".to_string(),
-                expected: "No mutation occurs.".to_string(),
-                method: "Run with dry-run semantics.".to_string(),
-                applicable: false,
-            },
-        ],
+    let contract_tests = vec![
+        ToolContractTest {
+            probe: "happy-path".to_string(),
+            expected: "Returns graph content.".to_string(),
+            method: "Run with valid input.".to_string(),
+            applicable: true,
+        },
+        ToolContractTest {
+            probe: "invalid-input".to_string(),
+            expected: "Returns a validation error.".to_string(),
+            method: "Run with malformed input.".to_string(),
+            applicable: true,
+        },
+        ToolContractTest {
+            probe: "side-effect-safety".to_string(),
+            expected: "No mutation occurs.".to_string(),
+            method: "Run with dry-run semantics.".to_string(),
+            applicable: false,
+        },
+    ];
+    let runtime_validation = RuntimeValidationSpec {
+        tool_name: "read_graph".to_string(),
+        contract_tests: contract_tests.clone(),
         probe_inputs: ProbeInputs::default(),
         probe_input_source: ProbeInputSource::Synthesized,
+    };
+    let workflow_skill = WorkflowSkillSpec {
+        id: "read_graph".to_string(),
+        title: "Read graph".to_string(),
+        goal: "Inspect the memory graph without relying on the MCP server.".to_string(),
+        when_to_use: "Use this when you need to inspect graph state and summarize it."
+            .to_string(),
+        trigger_phrases: vec!["read the graph".to_string()],
+        origin_tools: vec!["read_graph".to_string()],
+        prerequisite_workflows: vec![],
+        followup_workflows: vec![],
+        required_context: vec![WorkflowContextInput {
+            name: "graph_scope".to_string(),
+            guidance: "Know which graph or entity scope you want to inspect.".to_string(),
+            required: true,
+        }],
+        context_acquisition: vec![
+            "If the graph scope is unclear, ask the user which entities or namespaces to inspect."
+                .to_string(),
+        ],
+        branching_rules: vec![
+            "If the local graph export is missing, stop and ask the user where to read it from."
+                .to_string(),
+        ],
+        stop_and_ask: vec![
+            "Stop if the graph location or query is ambiguous instead of assuming defaults."
+                .to_string(),
+        ],
+        native_steps: vec![mcpsmith_core::NativeWorkflowStep {
+            title: "Read the graph export".to_string(),
+            command: "cat \"$GRAPH_EXPORT_PATH\"".to_string(),
+            details: Some(
+                "Replace $GRAPH_EXPORT_PATH with the concrete graph export path you collected."
+                    .to_string(),
+            ),
+        }],
+        verification: vec!["Confirm the file exists and the output contains graph data."
+            .to_string()],
+        return_contract: vec![
+            "Return the graph path you read together with a concise summary of entities and relations."
+                .to_string(),
+        ],
+        guardrails: vec!["Do not invent a graph path or silently fall back to another file."
+            .to_string()],
+        evidence: vec!["runtime metadata".to_string()],
+        confidence: 0.9,
     };
 
     DossierBundle {
@@ -84,7 +124,9 @@ fn sample_bundle(root: &Path) -> DossierBundle {
             format_version: 5,
             server,
             runtime_tools: vec![runtime_tool],
-            tool_dossiers: vec![tool_dossier],
+            runtime_validations: vec![runtime_validation],
+            workflow_skills: vec![workflow_skill],
+            tool_dossiers: vec![],
             server_gate: ServerGate::Ready,
             gate_reasons: vec![],
             backend_used: "claude".to_string(),
@@ -113,6 +155,12 @@ fn dossier_roundtrip_builds_skills_after_module_split() {
     assert!(build.servers[0].orchestrator_skill_path.exists());
     assert_eq!(build.servers[0].tool_skill_paths.len(), 1);
     assert!(build.servers[0].tool_skill_paths[0].exists());
+    let orchestrator_body =
+        std::fs::read_to_string(&build.servers[0].orchestrator_skill_path).unwrap();
+    let workflow_body = std::fs::read_to_string(&build.servers[0].tool_skill_paths[0]).unwrap();
+    assert!(!orchestrator_body.contains("mcp__"));
+    assert!(!workflow_body.contains("mcp__"));
+    assert!(!workflow_body.contains("maps to"));
     assert_eq!(
         build.servers[0].orchestrator_skill_path,
         dir.path().join("skills").join("memory").join("SKILL.md")

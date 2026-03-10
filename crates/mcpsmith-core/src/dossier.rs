@@ -1,14 +1,16 @@
-use crate::backend::{generate_tool_dossiers, prepare_backend_context};
+use crate::backend::{generate_workflow_skills, prepare_backend_context};
 use crate::inventory::{discover, resolve_server};
 use crate::runtime::introspect_tool_specs;
 use crate::skillset::{build_from_bundle, normalize_tool_name};
 use crate::{
     BackendContext, BuildResult, ConvertInventory, ConvertV3Options, DOSSIER_FORMAT_VERSION,
     DossierBundle, MCPServerProfile, PermissionLevel, ProbeInputSource, ProbeInputs, RuntimeTool,
-    ServerDossier, ServerGate, SourceEvidenceLevel, ToolContractTest, ToolDossier,
+    RuntimeValidationSpec, ServerDossier, ServerGate, SourceEvidenceLevel, ToolContractTest,
+    WorkflowContextInput, WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,6 +112,30 @@ fn upgrade_bundle_from_legacy(mut bundle: DossierBundle) -> DossierBundle {
                 tool.probe_input_source = ProbeInputSource::Backend;
             }
         }
+        if dossier.runtime_validations.is_empty() && !dossier.tool_dossiers.is_empty() {
+            dossier.runtime_validations = dossier
+                .tool_dossiers
+                .iter()
+                .map(|tool| RuntimeValidationSpec {
+                    tool_name: normalize_tool_name(&tool.name),
+                    contract_tests: tool.contract_tests.clone(),
+                    probe_inputs: tool.probe_inputs.clone(),
+                    probe_input_source: tool.probe_input_source,
+                })
+                .collect();
+        }
+        if dossier.workflow_skills.is_empty() && !dossier.tool_dossiers.is_empty() {
+            if !dossier.gate_reasons.iter().any(|reason| {
+                reason.contains(
+                    "Legacy tool-dossier bundles do not contain standalone workflow skills",
+                )
+            }) {
+                dossier.gate_reasons.push(
+                    "Legacy tool-dossier bundles do not contain standalone workflow skills; re-run `mcpsmith discover` with the current version.".to_string(),
+                );
+            }
+            dossier.server_gate = ServerGate::Blocked;
+        }
     }
     bundle
 }
@@ -164,26 +190,27 @@ fn discover_server_dossier(
 
     if runtime_tools.is_empty() {
         gate_reasons.push(
-            "No runtime tools available; cannot build deterministic per-tool recipes.".to_string(),
+            "No runtime tools available; cannot derive standalone replacement workflows."
+                .to_string(),
         );
     }
 
     let mut selected_backend = backend_ctx.selection.selected;
     let mut fallback_used = false;
-
-    let mut dossiers = vec![];
+    let runtime_validations = synthesize_runtime_validations(server, &runtime_tools);
+    let mut workflow_skills = vec![];
     if !runtime_tools.is_empty() {
-        match generate_tool_dossiers(
+        match generate_workflow_skills(
             selected_backend,
             server,
             &runtime_tools,
             options.backend_config.chunk_size.max(1),
             options.backend_config.timeout_seconds,
         ) {
-            Ok(generated) => dossiers = generated,
+            Ok(generated) => workflow_skills = generated,
             Err(err) => {
                 diagnostics.push(format!(
-                    "Primary backend '{}' failed: {err}",
+                    "Primary backend '{}' failed to synthesize standalone workflows: {err}",
                     selected_backend
                 ));
                 if backend_ctx.selection.auto_mode {
@@ -191,32 +218,39 @@ fn discover_server_dossier(
                         fallback_used = true;
                         selected_backend = fallback;
                         diagnostics.push(format!(
-                            "Retrying dossier generation with fallback backend '{}'.",
+                            "Retrying standalone workflow synthesis with fallback backend '{}'.",
                             fallback
                         ));
-                        match generate_tool_dossiers(
+                        match generate_workflow_skills(
                             fallback,
                             server,
                             &runtime_tools,
                             options.backend_config.chunk_size.max(1),
                             options.backend_config.timeout_seconds,
                         ) {
-                            Ok(generated) => dossiers = generated,
+                            Ok(generated) => workflow_skills = generated,
                             Err(fallback_err) => {
                                 diagnostics.push(format!(
-                                    "Warning: backend dossier generation failed on primary and fallback; using runtime fallback dossiers. fallback_error={fallback_err}"
+                                    "Standalone workflow synthesis failed on primary and fallback backends: fallback_error={fallback_err}"
                                 ));
+                                gate_reasons.push(
+                                    "Backend workflow synthesis failed on both primary and fallback backends."
+                                        .to_string(),
+                                );
                             }
                         }
                     } else {
                         diagnostics.push(format!(
-                            "Warning: backend dossier generation failed and no fallback backend is available; using runtime fallback dossiers. error={err}"
+                            "Standalone workflow synthesis failed and no fallback backend is available. error={err}"
                         ));
+                        gate_reasons.push(
+                            "Backend workflow synthesis failed and no fallback backend is available."
+                                .to_string(),
+                        );
                     }
                 } else {
-                    diagnostics.push(format!(
-                        "Warning: backend dossier generation failed; using runtime fallback dossiers. error={err}"
-                    ));
+                    diagnostics.push(format!("Standalone workflow synthesis failed. error={err}"));
+                    gate_reasons.push("Backend workflow synthesis failed.".to_string());
                 }
             }
         }
@@ -226,30 +260,27 @@ fn discover_server_dossier(
         .iter()
         .map(|tool| (normalize_tool_name(&tool.name), tool.clone()))
         .collect::<BTreeMap<_, _>>();
-
-    let mut dossier_map = dossiers
-        .into_iter()
-        .map(|tool| (normalize_tool_name(&tool.name), tool))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut tool_dossiers = vec![];
-    for name in runtime_map.keys() {
-        let mut dossier = dossier_map
-            .remove(name)
-            .unwrap_or_else(|| fallback_tool_dossier(server, runtime_map.get(name).unwrap()));
-        normalize_contract_tests(&mut dossier, server);
-        let runtime_tool = runtime_map.get(name).unwrap();
-        dossier.evidence = merge_source_grounding_evidence(dossier.evidence, server, runtime_tool);
-        if dossier.recipe.is_empty() {
-            gate_reasons.push(format!("Tool '{}' has no executable recipe.", name));
+    let mut covered_tools = BTreeSet::new();
+    for workflow in &mut workflow_skills {
+        hydrate_workflow_from_runtime_tools(workflow, server, &runtime_map);
+        merge_workflow_source_evidence(workflow, server, &runtime_map);
+        for reason in workflow_gate_reasons(workflow) {
+            gate_reasons.push(format!("Workflow '{}': {}", workflow.id, reason));
         }
-        if !has_required_probes(&dossier.contract_tests) {
+        for tool_name in &workflow.origin_tools {
+            covered_tools.insert(tool_name.clone());
+        }
+    }
+    for (name, runtime_tool) in &runtime_map {
+        if !tool_needs_standalone_workflow(runtime_tool) {
+            continue;
+        }
+        if !covered_tools.contains(name) {
             gate_reasons.push(format!(
-                "Tool '{}' is missing required contract tests (happy-path, invalid-input, side-effect-safety).",
+                "Tool '{}' has no concrete standalone replacement workflow.",
                 name
             ));
         }
-        tool_dossiers.push(dossier);
     }
 
     let mut backend_diagnostics = diagnostics;
@@ -273,7 +304,9 @@ fn discover_server_dossier(
         format_version: DOSSIER_FORMAT_VERSION,
         server: server.clone(),
         runtime_tools,
-        tool_dossiers,
+        runtime_validations,
+        workflow_skills,
+        tool_dossiers: vec![],
         server_gate,
         gate_reasons,
         backend_used: selected_backend.to_string(),
@@ -282,35 +315,192 @@ fn discover_server_dossier(
     })
 }
 
-pub(crate) fn fallback_tool_dossier(
+fn synthesize_runtime_validations(
     server: &MCPServerProfile,
-    runtime_tool: &RuntimeTool,
-) -> ToolDossier {
-    ToolDossier {
-        name: normalize_tool_name(&runtime_tool.name),
-        explanation: runtime_tool.description.clone().unwrap_or_else(|| {
-            format!(
-                "Execute '{}' actions for {}.",
-                runtime_tool.name, server.purpose
-            )
-        }),
-        recipe: vec![
-            "Validate required inputs against runtime tool schema before execution.".to_string(),
-            "Run the tool once with deterministic arguments and capture raw output.".to_string(),
-            "Validate status/output shape and return concise structured result.".to_string(),
-        ],
-        evidence: merge_source_grounding_evidence(
-            vec!["fallback: runtime metadata + deterministic defaults".to_string()],
-            server,
-            runtime_tool,
-        ),
-        confidence: 0.5,
-        contract_tests: default_contract_tests(server),
-        probe_inputs: ProbeInputs::default(),
-        probe_input_source: ProbeInputSource::Synthesized,
+    runtime_tools: &[RuntimeTool],
+) -> Vec<RuntimeValidationSpec> {
+    runtime_tools
+        .iter()
+        .map(|tool| RuntimeValidationSpec {
+            tool_name: normalize_tool_name(&tool.name),
+            contract_tests: default_contract_tests(server),
+            probe_inputs: ProbeInputs::default(),
+            probe_input_source: ProbeInputSource::Synthesized,
+        })
+        .collect()
+}
+
+fn merge_workflow_source_evidence(
+    workflow: &mut WorkflowSkillSpec,
+    server: &MCPServerProfile,
+    runtime_tools: &BTreeMap<String, RuntimeTool>,
+) {
+    for tool_name in &workflow.origin_tools {
+        if let Some(runtime_tool) = runtime_tools.get(tool_name) {
+            workflow
+                .evidence
+                .extend(source_ground_evidence(server, runtime_tool));
+        }
+    }
+    workflow.evidence.retain(|item| !item.trim().is_empty());
+    workflow
+        .evidence
+        .iter_mut()
+        .for_each(|item| *item = item.trim().to_string());
+    workflow.evidence.sort();
+    workflow.evidence.dedup();
+}
+
+fn hydrate_workflow_from_runtime_tools(
+    workflow: &mut WorkflowSkillSpec,
+    server: &MCPServerProfile,
+    runtime_tools: &BTreeMap<String, RuntimeTool>,
+) {
+    if workflow.required_context.is_empty() {
+        workflow.required_context = infer_required_context(workflow, runtime_tools);
+    }
+
+    if workflow.context_acquisition.is_empty() && !workflow.required_context.is_empty() {
+        workflow.context_acquisition = workflow
+            .required_context
+            .iter()
+            .map(|input| {
+                format!(
+                    "Ask for `{}` if it is not already known from prior workflow output or the local project.",
+                    input.name
+                )
+            })
+            .collect();
+    }
+
+    if workflow.guardrails.is_empty() {
+        workflow.guardrails = default_workflow_guardrails(server, workflow);
     }
 }
 
+fn infer_required_context(
+    workflow: &WorkflowSkillSpec,
+    runtime_tools: &BTreeMap<String, RuntimeTool>,
+) -> Vec<WorkflowContextInput> {
+    let mut out = vec![];
+    let mut seen = BTreeSet::new();
+
+    for tool_name in &workflow.origin_tools {
+        let Some(schema) = runtime_tools
+            .get(tool_name)
+            .and_then(|tool| tool.input_schema.as_ref())
+        else {
+            continue;
+        };
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let properties = schema.get("properties").and_then(Value::as_object);
+
+        for name in required {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let guidance = properties
+                .and_then(|props| props.get(&name))
+                .and_then(Value::as_object)
+                .and_then(|prop| prop.get("description"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("Provide `{name}` before running this workflow."));
+            out.push(WorkflowContextInput {
+                name,
+                guidance,
+                required: true,
+            });
+        }
+    }
+
+    out
+}
+
+fn default_workflow_guardrails(
+    server: &MCPServerProfile,
+    workflow: &WorkflowSkillSpec,
+) -> Vec<String> {
+    let mut guardrails =
+        vec!["Do not guess missing paths, identifiers, or simulator targets.".to_string()];
+    if server.inferred_permission != PermissionLevel::ReadOnly {
+        guardrails.push(
+            "Double-check commands before mutating build artifacts, simulator state, or persisted configuration."
+                .to_string(),
+        );
+    }
+    if workflow
+        .origin_tools
+        .iter()
+        .any(|tool| tool.contains("clean"))
+    {
+        guardrails.push(
+            "Confirm the target build products before removing or cleaning anything.".to_string(),
+        );
+    }
+    guardrails
+}
+
+fn tool_needs_standalone_workflow(tool: &RuntimeTool) -> bool {
+    let name = normalize_tool_name(&tool.name);
+    let description = tool
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if name.starts_with("session_")
+        && (description.contains("default")
+            || description.contains("profile")
+            || description.contains("session"))
+    {
+        return false;
+    }
+
+    true
+}
+
+fn workflow_gate_reasons(workflow: &WorkflowSkillSpec) -> Vec<String> {
+    let mut reasons = vec![];
+    if workflow.id.trim().is_empty() {
+        reasons.push("workflow id is empty".to_string());
+    }
+    if workflow.goal.trim().is_empty() {
+        reasons.push("goal is empty".to_string());
+    }
+    if workflow.when_to_use.trim().is_empty() {
+        reasons.push("when_to_use is empty".to_string());
+    }
+    if workflow.origin_tools.is_empty() {
+        reasons.push("origin_tools is empty".to_string());
+    }
+    if workflow.native_steps.is_empty() {
+        reasons.push("native_steps is empty".to_string());
+    }
+    if workflow.verification.is_empty() {
+        reasons.push("verification is empty".to_string());
+    }
+    if workflow.return_contract.is_empty() {
+        reasons.push("return_contract is empty".to_string());
+    }
+    if workflow.stop_and_ask.is_empty() {
+        reasons.push("stop_and_ask is empty".to_string());
+    }
+    reasons
+}
+
+#[cfg(test)]
 pub(crate) fn merge_source_grounding_evidence(
     mut evidence: Vec<String>,
     server: &MCPServerProfile,
@@ -417,62 +607,6 @@ pub(crate) fn default_contract_tests(server: &MCPServerProfile) -> Vec<ToolContr
     ]
 }
 
-pub(crate) fn normalize_contract_tests(dossier: &mut ToolDossier, server: &MCPServerProfile) {
-    for test in &mut dossier.contract_tests {
-        test.probe = test.probe.trim().to_ascii_lowercase();
-        test.expected = test.expected.trim().to_string();
-        test.method = test.method.trim().to_string();
-        if test.expected.is_empty() {
-            test.expected = "Expected behavior not provided by backend.".to_string();
-        }
-        if test.method.is_empty() {
-            test.method = "Method not provided by backend.".to_string();
-        }
-    }
-
-    if !has_required_probes(&dossier.contract_tests) {
-        let mut defaults = default_contract_tests(server);
-        let existing = dossier
-            .contract_tests
-            .iter()
-            .map(|test| test.probe.clone())
-            .collect::<BTreeSet<_>>();
-        for default in defaults.drain(..) {
-            if !existing.contains(&default.probe) {
-                dossier.contract_tests.push(default);
-            }
-        }
-    }
-
-    dossier.confidence = dossier.confidence.clamp(0.0, 1.0);
-    dossier.recipe.retain(|step| !step.trim().is_empty());
-    dossier.evidence.retain(|item| !item.trim().is_empty());
-    dossier
-        .recipe
-        .iter_mut()
-        .for_each(|step| *step = step.trim().to_string());
-    dossier
-        .evidence
-        .iter_mut()
-        .for_each(|item| *item = item.trim().to_string());
-
-    if dossier.probe_input_source == ProbeInputSource::Synthesized
-        && has_any_probe_inputs(&dossier.probe_inputs)
-    {
-        dossier.probe_input_source = ProbeInputSource::Backend;
-    }
-}
-
-pub(crate) fn has_required_probes(tests: &[ToolContractTest]) -> bool {
-    let probes = tests
-        .iter()
-        .map(|test| test.probe.trim().to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
-    probes.contains("happy-path")
-        && probes.contains("invalid-input")
-        && probes.contains("side-effect-safety")
-}
-
 pub(crate) fn has_any_probe_inputs(probe_inputs: &ProbeInputs) -> bool {
     probe_inputs.happy_path.is_some()
         || probe_inputs.invalid_input.is_some()
@@ -512,6 +646,7 @@ mod tests {
                 repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
                 inspected_paths: vec![],
                 inspected_urls: vec![],
+                derivation_evidence: vec![],
             },
         };
         let tool = RuntimeTool {
@@ -566,6 +701,7 @@ mod tests {
                 repository_url: None,
                 inspected_paths: vec![],
                 inspected_urls: vec![],
+                derivation_evidence: vec![],
             },
         };
         let tool = RuntimeTool {
@@ -594,5 +730,25 @@ mod tests {
                 .iter()
                 .any(|item| item == "source-package: @playwright/mcp@latest")
         );
+    }
+
+    #[test]
+    fn session_default_tools_do_not_require_standalone_workflows() {
+        let session_tool = RuntimeTool {
+            name: "session_show_defaults".to_string(),
+            description: Some(
+                "Show current active defaults. Required before your first build/run/test call in a session."
+                    .to_string(),
+            ),
+            input_schema: None,
+        };
+        let capability_tool = RuntimeTool {
+            name: "screenshot".to_string(),
+            description: Some("Capture screenshot.".to_string()),
+            input_schema: None,
+        };
+
+        assert!(!tool_needs_standalone_workflow(&session_tool));
+        assert!(tool_needs_standalone_workflow(&capability_tool));
     }
 }

@@ -1,12 +1,9 @@
-use crate::dossier::{
-    default_contract_tests, has_any_probe_inputs, merge_source_grounding_evidence,
-};
 use crate::skillset::normalize_tool_name;
 use crate::{
     BackendContext, BackendHealthStatus, BackendSelection, ConvertBackendConfig,
     ConvertBackendHealthReport, ConvertBackendName, ConvertBackendPreference, ConvertV3Options,
-    DEFAULT_BACKEND_TIMEOUT_SECONDS, MCPServerProfile, ProbeInputSource, RuntimeTool, ToolDossier,
-    ToolEnrichmentResponse, ToolSkillHint, ToolSpec,
+    DEFAULT_BACKEND_TIMEOUT_SECONDS, MCPServerProfile, RuntimeTool, ToolEnrichmentResponse,
+    ToolSkillHint, ToolSpec, WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -128,10 +125,14 @@ fn invoke_codex_structured_with_command(
         .with_context(|| format!("Failed to write {}", schema_path.display()))?;
     let temp_files = vec![schema_path.clone(), output_path.clone()];
 
-    let mut child = match Command::new(command)
+    let mut codex = Command::new(command);
+    configure_backend_command(&mut codex, ConvertBackendName::Codex);
+    let mut child = match codex
         .args([
             "exec",
             "--ephemeral",
+            "-c",
+            "model_reasoning_effort=\"medium\"",
             "--output-schema",
             schema_path.to_string_lossy().as_ref(),
             "--output-last-message",
@@ -170,7 +171,7 @@ fn invoke_codex_structured_with_command(
         bail!(
             "Codex enrichment failed with status {}: {}",
             output.status,
-            clipped_preview(stderr.trim(), 220)
+            clipped_tail_preview(stderr.trim(), 1600)
         );
     }
 
@@ -276,6 +277,15 @@ pub(crate) fn clipped_preview(input: &str, max_chars: usize) -> String {
     }
 }
 
+pub(crate) fn clipped_tail_preview(input: &str, max_chars: usize) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return input.to_string();
+    }
+    let start = chars.len().saturating_sub(max_chars);
+    format!("...{}", chars[start..].iter().collect::<String>())
+}
+
 pub fn backend_health_report(_config: &ConvertBackendConfig) -> ConvertBackendHealthReport {
     ConvertBackendHealthReport {
         checked_at: Utc::now(),
@@ -286,67 +296,169 @@ pub fn backend_health_report(_config: &ConvertBackendConfig) -> ConvertBackendHe
     }
 }
 
-pub(crate) fn generate_tool_dossiers(
+pub(crate) fn generate_workflow_skills(
     backend_name: ConvertBackendName,
     server: &MCPServerProfile,
     runtime_tools: &[RuntimeTool],
     chunk_size: usize,
     timeout_seconds: u64,
-) -> Result<Vec<ToolDossier>> {
-    let chunks = runtime_tools
-        .chunks(chunk_size.max(1))
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-
+) -> Result<Vec<WorkflowSkillSpec>> {
     let backend = backend_by_name(backend_name, timeout_seconds);
-    let schema = tool_dossier_chunk_schema();
+    let schema = workflow_chunk_schema();
 
     let mut out = vec![];
-    for chunk in chunks {
-        let runtime_map = chunk
-            .iter()
-            .map(|tool| (normalize_tool_name(&tool.name), tool.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let prompt = build_tool_chunk_prompt(server, &chunk);
-        let raw = backend.explain_tool_chunk(&prompt, &schema)?;
-        let parsed = parse_backend_chunk_response(&raw)?;
-
-        for mut dossier in parsed.tool_dossiers {
-            dossier.name = normalize_tool_name(&dossier.name);
-            if dossier.recipe.is_empty() {
-                dossier.recipe = vec![
-                    "Validate inputs against runtime schema.".to_string(),
-                    "Execute tool with deterministic arguments.".to_string(),
-                    "Verify output/error contract and summarize outcome.".to_string(),
-                ];
-            }
-            if dossier.contract_tests.is_empty() {
-                dossier.contract_tests = default_contract_tests(server);
-            }
-            let runtime_tool =
-                runtime_map
-                    .get(&dossier.name)
-                    .cloned()
-                    .unwrap_or_else(|| RuntimeTool {
-                        name: dossier.name.clone(),
-                        description: None,
-                        input_schema: None,
-                    });
-            dossier.evidence =
-                merge_source_grounding_evidence(dossier.evidence, server, &runtime_tool);
-            dossier.probe_input_source = if has_any_probe_inputs(&dossier.probe_inputs) {
-                ProbeInputSource::Backend
-            } else {
-                ProbeInputSource::Synthesized
-            };
-            out.push(dossier);
-        }
+    for chunk in runtime_tools.chunks(chunk_size.max(1)) {
+        out.extend(generate_workflow_chunk_specs(
+            backend.as_ref(),
+            server,
+            chunk,
+            runtime_tools,
+            &schema,
+        )?);
     }
 
     Ok(out)
 }
 
-fn build_tool_chunk_prompt(server: &MCPServerProfile, tools: &[RuntimeTool]) -> String {
+fn generate_workflow_chunk_specs(
+    backend: &dyn AgentBackend,
+    server: &MCPServerProfile,
+    chunk: &[RuntimeTool],
+    all_runtime_tools: &[RuntimeTool],
+    schema: &str,
+) -> Result<Vec<WorkflowSkillSpec>> {
+    let prompt = build_workflow_chunk_prompt(server, chunk, all_runtime_tools);
+    let raw = match backend.explain_tool_chunk(&prompt, schema) {
+        Ok(raw) => raw,
+        Err(err) if chunk.len() > 1 && should_split_workflow_chunk(&err) => {
+            return split_workflow_chunk_specs(backend, server, chunk, all_runtime_tools, schema);
+        }
+        Err(err) => return Err(err),
+    };
+    let parsed = match parse_backend_workflow_response(&raw) {
+        Ok(parsed) => parsed,
+        Err(err) if chunk.len() > 1 && should_split_workflow_chunk(&err) => {
+            return split_workflow_chunk_specs(backend, server, chunk, all_runtime_tools, schema);
+        }
+        Err(err) => return Err(err),
+    };
+    let known_tools = all_runtime_tools
+        .iter()
+        .map(|tool| normalize_tool_name(&tool.name))
+        .collect::<BTreeSet<_>>();
+
+    Ok(parsed
+        .workflow_skills
+        .into_iter()
+        .map(|workflow| normalize_workflow_skill(workflow, &known_tools))
+        .collect())
+}
+
+fn split_workflow_chunk_specs(
+    backend: &dyn AgentBackend,
+    server: &MCPServerProfile,
+    chunk: &[RuntimeTool],
+    all_runtime_tools: &[RuntimeTool],
+    schema: &str,
+) -> Result<Vec<WorkflowSkillSpec>> {
+    let midpoint = chunk.len() / 2;
+    let mut left = generate_workflow_chunk_specs(
+        backend,
+        server,
+        &chunk[..midpoint],
+        all_runtime_tools,
+        schema,
+    )?;
+    let mut right = generate_workflow_chunk_specs(
+        backend,
+        server,
+        &chunk[midpoint..],
+        all_runtime_tools,
+        schema,
+    )?;
+    left.append(&mut right);
+    Ok(left)
+}
+
+fn normalize_workflow_skill(
+    mut workflow: WorkflowSkillSpec,
+    known_tools: &BTreeSet<String>,
+) -> WorkflowSkillSpec {
+    workflow.id = normalize_tool_name(&workflow.id);
+    workflow.title = workflow.title.trim().to_string();
+    workflow.goal = workflow.goal.trim().to_string();
+    workflow.when_to_use = workflow.when_to_use.trim().to_string();
+    workflow.trigger_phrases = clean_hint_list(workflow.trigger_phrases);
+    workflow.origin_tools = workflow
+        .origin_tools
+        .into_iter()
+        .map(|tool| normalize_tool_name(&tool))
+        .filter(|tool| known_tools.contains(tool))
+        .collect::<Vec<_>>();
+    workflow.origin_tools.sort();
+    workflow.origin_tools.dedup();
+    workflow.prerequisite_workflows = workflow
+        .prerequisite_workflows
+        .into_iter()
+        .map(|item| normalize_tool_name(&item))
+        .collect::<Vec<_>>();
+    workflow.prerequisite_workflows.sort();
+    workflow.prerequisite_workflows.dedup();
+    workflow.followup_workflows = workflow
+        .followup_workflows
+        .into_iter()
+        .map(|item| normalize_tool_name(&item))
+        .collect::<Vec<_>>();
+    workflow.followup_workflows.sort();
+    workflow.followup_workflows.dedup();
+    for item in &mut workflow.required_context {
+        item.name = item.name.trim().to_string();
+        item.guidance = item.guidance.trim().to_string();
+    }
+    workflow
+        .required_context
+        .retain(|item| !item.name.is_empty() && !item.guidance.is_empty());
+    workflow.context_acquisition = clean_hint_list(workflow.context_acquisition);
+    workflow.branching_rules = clean_hint_list(workflow.branching_rules);
+    workflow.stop_and_ask = clean_hint_list(workflow.stop_and_ask);
+    for step in &mut workflow.native_steps {
+        step.title = step.title.trim().to_string();
+        step.command = step.command.trim().to_string();
+        step.details = clean_optional_text(step.details.take());
+    }
+    workflow
+        .native_steps
+        .retain(|step| !step.title.is_empty() && !step.command.is_empty());
+    workflow.verification = clean_hint_list(workflow.verification);
+    workflow.return_contract = clean_hint_list(workflow.return_contract);
+    workflow.guardrails = clean_hint_list(workflow.guardrails);
+    workflow.evidence = clean_hint_list(workflow.evidence);
+    workflow.confidence = workflow.confidence.clamp(0.0, 1.0);
+    workflow
+}
+
+fn is_backend_timeout_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().to_ascii_lowercase().contains("timed out"))
+}
+
+fn should_split_workflow_chunk(err: &anyhow::Error) -> bool {
+    if is_backend_timeout_error(err) {
+        return true;
+    }
+    err.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("backend failed with status")
+            || message.contains("not valid workflow json")
+            || message.contains("contained no workflow_skills")
+    })
+}
+
+fn build_workflow_chunk_prompt(
+    server: &MCPServerProfile,
+    tools: &[RuntimeTool],
+    all_runtime_tools: &[RuntimeTool],
+) -> String {
     let source_json = serde_json::to_string_pretty(&serde_json::json!({
         "command": &server.command,
         "args": &server.args,
@@ -355,95 +467,136 @@ fn build_tool_chunk_prompt(server: &MCPServerProfile, tools: &[RuntimeTool]) -> 
     }))
     .unwrap_or_else(|_| "{}".to_string());
     let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_string());
+    let all_tool_names = all_runtime_tools
+        .iter()
+        .map(|tool| normalize_tool_name(&tool.name))
+        .collect::<Vec<_>>();
+    let all_tools_json =
+        serde_json::to_string_pretty(&all_tool_names).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "You are generating deterministic tool dossiers for MCP -> skill conversion.\n\
+        "You are generating standalone workflow skills that will replace an MCP server after the MCP is removed.\n\
 Return only JSON matching the schema.\n\
-Do not invent tool names. Use names exactly from runtime_tools.\n\
+Do not run shell commands, inspect files, browse repositories, or call any MCP tools while answering.\n\
+Treat the prompt as the complete evidence set; author the workflow JSON directly from the embedded source/runtime data.\n\
+You are not executing the workflow now. You are only writing reusable instructions for a future agent.\n\
+Do not mention MCP, tools/list, tools/call, or `mcp__...` names in the workflow text.\n\
+Assume the generated SKILL.md files must work using only native system tools, shell commands, files, and already-installed local skills.\n\
+Use the inspected source/docs evidence to derive concrete native commands whenever possible.\n\
+If the evidence is insufficient for a concrete replacement workflow, leave the workflow out instead of inventing it.\n\
 \n\
 Server name: {}\n\
 Server purpose: {}\n\
 Source grounding:\n{}\n\
 \n\
-Runtime tools:\n{}\n\
+All runtime tool names:\n{}\n\
 \n\
-Requirements per tool:\n\
-- explanation: concise behavior summary\n\
-- recipe: deterministic steps to execute and verify the tool\n\
-- evidence: runtime/source grounding references\n\
+Runtime tools in this chunk:\n{}\n\
+\n\
+Requirements per workflow:\n\
+- id: stable slug-like workflow id\n\
+- title: user-facing workflow title\n\
+- goal: what the workflow accomplishes\n\
+- when_to_use: trigger guidance for when an agent should choose this workflow\n\
+- origin_tools: runtime tool names this workflow replaces or was derived from\n\
+- stop_and_ask: situations that require stopping and asking the user\n\
+- trigger_phrases: short user request examples\n\
+- native_steps: concrete native commands or local-skill calls. Commands must be executable shell snippets, not prose placeholders. Each step must include title, command, and details (use null when no extra details are needed).\n\
+- verification: how to confirm the workflow succeeded\n\
+- return_contract: what the agent must return to the user after running it\n\
 - confidence: float between 0 and 1\n\
-- contract_tests must include probes: happy-path, invalid-input, side-effect-safety\n\
-- probe_inputs: optional deterministic request args for happy-path/invalid-input/side-effect-safety\n\
-- probe_input_source: backend if probe_inputs came from backend, otherwise synthesized\n",
-        server.name, server.purpose, source_json, tools_json
+Return only those fields. mcpsmith will derive any remaining optional sections after parsing.\n\
+Generate at least one workflow for each runtime tool in the chunk when the evidence supports a concrete standalone procedure.\n",
+        server.name, server.purpose, source_json, all_tools_json, tools_json
     )
 }
 
-fn tool_dossier_chunk_schema() -> String {
-    r#"{
-  \"type\": \"object\",
-  \"additionalProperties\": false,
-  \"required\": [\"tool_dossiers\"],
-  \"properties\": {
-    \"tool_dossiers\": {
-      \"type\": \"array\",
-      \"items\": {
-        \"type\": \"object\",
-        \"additionalProperties\": false,
-        \"required\": [\"name\", \"explanation\", \"recipe\", \"evidence\", \"confidence\", \"contract_tests\"],
-        \"properties\": {
-          \"name\": { \"type\": \"string\" },
-          \"explanation\": { \"type\": \"string\" },
-          \"recipe\": { \"type\": \"array\", \"items\": { \"type\": \"string\" } },
-          \"evidence\": { \"type\": \"array\", \"items\": { \"type\": \"string\" } },
-          \"confidence\": { \"type\": \"number\" },
-          \"probe_inputs\": {
-            \"type\": \"object\",
-            \"additionalProperties\": false,
-            \"properties\": {
-              \"happy_path\": { \"type\": \"object\" },
-              \"invalid_input\": { \"type\": \"object\" },
-              \"side_effect_safety\": { \"type\": \"object\" }
+fn workflow_chunk_schema() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workflow_skills"],
+        "properties": {
+            "workflow_skills": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "id",
+                        "title",
+                        "goal",
+                        "when_to_use",
+                        "trigger_phrases",
+                        "origin_tools",
+                        "stop_and_ask",
+                        "native_steps",
+                        "verification",
+                        "return_contract",
+                        "confidence"
+                    ],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "goal": { "type": "string" },
+                        "when_to_use": { "type": "string" },
+                        "trigger_phrases": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "origin_tools": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "stop_and_ask": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "native_steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["title", "command", "details"],
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "command": { "type": "string" },
+                                    "details": { "type": ["string", "null"] }
+                                }
+                            }
+                        },
+                        "verification": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "return_contract": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "confidence": { "type": "number" }
+                    }
+                }
             }
-          },
-          \"probe_input_source\": { \"type\": \"string\", \"enum\": [\"backend\", \"synthesized\"] },
-          \"contract_tests\": {
-            \"type\": \"array\",
-            \"items\": {
-              \"type\": \"object\",
-              \"additionalProperties\": false,
-              \"required\": [\"probe\", \"expected\", \"method\", \"applicable\"],
-              \"properties\": {
-                \"probe\": { \"type\": \"string\" },
-                \"expected\": { \"type\": \"string\" },
-                \"method\": { \"type\": \"string\" },
-                \"applicable\": { \"type\": \"boolean\" }
-              }
-            }
-          }
         }
-      }
-    }
-  }
-}"#
-        .to_string()
+    }))
+    .expect("workflow schema should serialize")
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BackendChunkResponse {
-    tool_dossiers: Vec<ToolDossier>,
+struct BackendWorkflowResponse {
+    workflow_skills: Vec<WorkflowSkillSpec>,
 }
 
-fn parse_backend_chunk_response(raw: &str) -> Result<BackendChunkResponse> {
+fn parse_backend_workflow_response(raw: &str) -> Result<BackendWorkflowResponse> {
     let trimmed = raw.trim();
-    let response: BackendChunkResponse = serde_json::from_str(trimmed).with_context(|| {
+    let response: BackendWorkflowResponse = serde_json::from_str(trimmed).with_context(|| {
         format!(
-            "Backend response is not valid dossier JSON: {}",
+            "Backend response is not valid workflow JSON: {}",
             clipped_preview(trimmed, 300)
         )
     })?;
-    if response.tool_dossiers.is_empty() {
-        bail!("Backend response contained no tool_dossiers.");
+    if response.workflow_skills.is_empty() {
+        bail!("Backend response contained no workflow_skills.");
     }
     Ok(response)
 }
@@ -558,7 +711,9 @@ fn command_health(name: ConvertBackendName, command: &str) -> BackendHealthStatu
     let mut diagnostics = vec![];
 
     for args in checks {
-        match Command::new(command)
+        let mut probe = Command::new(command);
+        configure_backend_command(&mut probe, name);
+        match probe
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -707,11 +862,15 @@ fn invoke_codex_structured_with_timeout(
     fs::write(&schema_path, schema_json)
         .with_context(|| format!("Failed to write {}", schema_path.display()))?;
 
+    let mut codex = Command::new(command);
+    configure_backend_command(&mut codex, ConvertBackendName::Codex);
     let output = run_command_with_timeout(
-        Command::new(command)
+        codex
             .args([
                 "exec",
                 "--ephemeral",
+                "-c",
+                "model_reasoning_effort=\"medium\"",
                 "--output-schema",
                 schema_path.to_string_lossy().as_ref(),
                 "--output-last-message",
@@ -739,7 +898,7 @@ fn invoke_codex_structured_with_timeout(
             let message = format!(
                 "Codex backend failed with status {}: {}",
                 output.status,
-                clipped_preview(stderr.trim(), 220)
+                clipped_tail_preview(stderr.trim(), 1600)
             );
             cleanup_temp_files(&[schema_path, output_path]);
             bail!(message);
@@ -765,8 +924,10 @@ fn invoke_claude_structured_with_timeout(
         schema_json, prompt
     );
 
+    let mut claude = Command::new(command);
+    configure_backend_command(&mut claude, ConvertBackendName::Claude);
     let output = run_command_with_timeout(
-        Command::new(command)
+        claude
             .args([
                 "--print",
                 "--no-session-persistence",
@@ -787,7 +948,7 @@ fn invoke_claude_structured_with_timeout(
         bail!(
             "Claude backend failed with status {}: {}",
             output.status,
-            clipped_preview(stderr.trim(), 220)
+            clipped_tail_preview(stderr.trim(), 1600)
         );
     }
 
@@ -854,7 +1015,7 @@ fn extract_claude_json_payload(stdout: &str) -> Result<String> {
     }
 
     if let Ok(value) = serde_json::from_str::<Value>(trimmed)
-        && value.get("tool_dossiers").is_some()
+        && value.get("workflow_skills").is_some()
     {
         return Ok(trimmed.to_string());
     }
@@ -910,6 +1071,23 @@ fn extract_claude_json_payload(stdout: &str) -> Result<String> {
     bail!("No JSON payload found in Claude envelope.")
 }
 
+fn configure_backend_command(command: &mut Command, backend: ConvertBackendName) {
+    if let Some(home) = backend_home_override(backend) {
+        command.env("HOME", home);
+    }
+}
+
+fn backend_home_override(backend: ConvertBackendName) -> Option<String> {
+    let env_key = match backend {
+        ConvertBackendName::Codex => "MCPSMITH_CODEX_HOME",
+        ConvertBackendName::Claude => "MCPSMITH_CLAUDE_HOME",
+    };
+    std::env::var(env_key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn extract_embedded_json(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if serde_json::from_str::<Value>(trimmed).is_ok() {
@@ -942,9 +1120,17 @@ fn extract_embedded_json(text: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{ConversionRecommendation, PermissionLevel, SourceEvidenceLevel};
+    use anyhow::anyhow;
+    use std::cell::RefCell;
+    use std::sync::{Mutex, OnceLock};
+
+    fn backend_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
-    fn build_tool_chunk_prompt_includes_source_grounding_summary() {
+    fn build_workflow_chunk_prompt_includes_source_grounding_summary() {
         let server = MCPServerProfile {
             id: "fixture:playwright".to_string(),
             name: "playwright".to_string(),
@@ -971,6 +1157,7 @@ mod tests {
                 repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
                 inspected_paths: vec![],
                 inspected_urls: vec![],
+                derivation_evidence: vec![],
             },
         };
         let tools = vec![RuntimeTool {
@@ -979,9 +1166,189 @@ mod tests {
             input_schema: None,
         }];
 
-        let prompt = build_tool_chunk_prompt(&server, &tools);
+        let prompt = build_workflow_chunk_prompt(&server, &tools, &tools);
         assert!(prompt.contains("Source grounding"));
         assert!(prompt.contains("@playwright/mcp"));
         assert!(prompt.contains("https://github.com/microsoft/playwright-mcp"));
+        assert!(prompt.contains("native_steps"));
+        assert!(prompt.contains("Do not run shell commands"));
+    }
+
+    #[test]
+    fn workflow_chunk_schema_is_valid_json() {
+        let schema = workflow_chunk_schema();
+        let parsed: Value = serde_json::from_str(&schema).expect("schema should parse as JSON");
+        assert_eq!(parsed["type"], "object");
+        assert_eq!(parsed["properties"]["workflow_skills"]["type"], "array");
+    }
+
+    #[test]
+    fn clipped_tail_preview_keeps_end_of_text() {
+        let preview = clipped_tail_preview("abcdefghijklmnopqrstuvwxyz", 6);
+        assert_eq!(preview, "...uvwxyz");
+    }
+
+    #[test]
+    fn generate_workflow_skills_splits_chunks_on_backend_failure() {
+        #[derive(Default)]
+        struct SplitBackend {
+            seen_chunk_sizes: RefCell<Vec<usize>>,
+        }
+
+        impl AgentBackend for SplitBackend {
+            fn discover_tools_dossier(&self, _prompt: &str, _schema_json: &str) -> Result<String> {
+                unreachable!("not used in workflow synthesis tests")
+            }
+
+            fn explain_tool_chunk(&self, prompt: &str, _schema_json: &str) -> Result<String> {
+                let chunk_size = prompt.matches("\"name\":").count();
+                self.seen_chunk_sizes.borrow_mut().push(chunk_size);
+                if chunk_size > 1 {
+                    return Err(anyhow!(
+                        "Codex backend failed with status exit status: 1: prompt too large"
+                    ));
+                }
+
+                let tool_name = prompt
+                    .lines()
+                    .find(|line| line.contains("\"name\":"))
+                    .and_then(|line| line.split("\"name\":").nth(1))
+                    .and_then(|line| line.split('"').nth(1))
+                    .unwrap_or("unknown");
+
+                Ok(format!(
+                    r#"{{
+  "workflow_skills": [
+    {{
+      "id": "{tool_name}",
+      "title": "Use {tool_name}",
+      "goal": "Run {tool_name} natively",
+      "when_to_use": "Use this when you need {tool_name}.",
+      "trigger_phrases": ["run {tool_name}"],
+      "origin_tools": ["{tool_name}"],
+      "required_context": [
+        {{
+          "name": "target",
+          "guidance": "Know which target to operate on.",
+          "required": true
+        }}
+      ],
+      "context_acquisition": ["Ask for the target if it is missing."],
+      "branching_rules": ["If the target is unavailable, stop."],
+      "stop_and_ask": ["Stop when the target is ambiguous."],
+      "native_steps": [
+        {{
+          "title": "Echo the tool",
+          "command": "printf '%s\\n' '{tool_name}'"
+        }}
+      ],
+      "verification": ["Confirm the command completed successfully."],
+      "return_contract": ["Return the command output."],
+      "guardrails": ["Do not guess the target."],
+      "evidence": ["tool:{tool_name}"],
+      "confidence": 0.8
+    }}
+  ]
+}}"#
+                ))
+            }
+
+            fn health_check(&self) -> BackendHealthStatus {
+                BackendHealthStatus {
+                    backend: ConvertBackendName::Codex,
+                    available: true,
+                    diagnostics: vec![],
+                }
+            }
+
+            fn backend_name(&self) -> ConvertBackendName {
+                ConvertBackendName::Codex
+            }
+        }
+
+        let backend = SplitBackend::default();
+        let server = MCPServerProfile {
+            id: "fixture:split".to_string(),
+            name: "split-server".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Split prompts".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@acme/split".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 2,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "fixture".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::ConfigOnly,
+                inspected: false,
+                entrypoint: None,
+                package_name: Some("@acme/split".to_string()),
+                package_version: Some("1.0.0".to_string()),
+                homepage: None,
+                repository_url: None,
+                inspected_paths: vec![],
+                inspected_urls: vec![],
+                derivation_evidence: vec![],
+            },
+        };
+        let tools = vec![
+            RuntimeTool {
+                name: "alpha".to_string(),
+                description: Some("First tool".to_string()),
+                input_schema: None,
+            },
+            RuntimeTool {
+                name: "beta".to_string(),
+                description: Some("Second tool".to_string()),
+                input_schema: None,
+            },
+        ];
+
+        let generated = generate_workflow_chunk_specs(
+            &backend,
+            &server,
+            &tools,
+            &tools,
+            &workflow_chunk_schema(),
+        )
+        .expect("chunk splitting should recover");
+
+        assert_eq!(generated.len(), 2);
+        assert_eq!(backend.seen_chunk_sizes.borrow().as_slice(), &[2, 1, 1]);
+    }
+
+    #[test]
+    fn backend_home_override_uses_backend_specific_env_var() {
+        let _guard = backend_env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("MCPSMITH_CODEX_HOME");
+            std::env::remove_var("MCPSMITH_CLAUDE_HOME");
+        }
+        assert_eq!(backend_home_override(ConvertBackendName::Codex), None);
+        assert_eq!(backend_home_override(ConvertBackendName::Claude), None);
+
+        unsafe {
+            std::env::set_var("MCPSMITH_CODEX_HOME", " /tmp/codex-home ");
+            std::env::set_var("MCPSMITH_CLAUDE_HOME", "/tmp/claude-home");
+        }
+
+        assert_eq!(
+            backend_home_override(ConvertBackendName::Codex).as_deref(),
+            Some("/tmp/codex-home")
+        );
+        assert_eq!(
+            backend_home_override(ConvertBackendName::Claude).as_deref(),
+            Some("/tmp/claude-home")
+        );
+
+        unsafe {
+            std::env::remove_var("MCPSMITH_CODEX_HOME");
+            std::env::remove_var("MCPSMITH_CLAUDE_HOME");
+        }
     }
 }

@@ -26,9 +26,9 @@ pub use dossier::{
 pub use inventory::{discover, inspect, plan};
 pub use skillset::build_from_bundle;
 
-const DOSSIER_FORMAT_VERSION: u32 = 5;
-const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 90;
-const DEFAULT_BACKEND_CHUNK_SIZE: usize = 8;
+const DOSSIER_FORMAT_VERSION: u32 = 6;
+const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 240;
+const DEFAULT_BACKEND_CHUNK_SIZE: usize = 4;
 const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_PROBE_RETRIES: u32 = 0;
 
@@ -166,6 +166,25 @@ pub struct SourceGrounding {
     pub inspected_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inspected_urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derivation_evidence: Vec<DerivationEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum DerivationEvidenceKind {
+    ManifestSnippet,
+    ReadmeSnippet,
+    EntrypointSnippet,
+    CliHelp,
+    RemoteDocSnippet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DerivationEvidence {
+    pub kind: DerivationEvidenceKind,
+    pub source: String,
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -422,7 +441,7 @@ pub struct ToolDossier {
     pub probe_input_source: ProbeInputSource,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProbeInputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub happy_path: Option<Value>,
@@ -446,6 +465,71 @@ pub enum ProbeInputSource {
     Synthesized,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeValidationSpec {
+    pub tool_name: String,
+    pub contract_tests: Vec<ToolContractTest>,
+    #[serde(default, skip_serializing_if = "probe_inputs_is_empty")]
+    pub probe_inputs: ProbeInputs,
+    #[serde(default)]
+    pub probe_input_source: ProbeInputSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowContextInput {
+    pub name: String,
+    pub guidance: String,
+    #[serde(default = "default_context_required")]
+    pub required: bool,
+}
+
+fn default_context_required() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeWorkflowStep {
+    pub title: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowSkillSpec {
+    pub id: String,
+    pub title: String,
+    pub goal: String,
+    pub when_to_use: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_phrases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisite_workflows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followup_workflows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_context: Vec<WorkflowContextInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_acquisition: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branching_rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_and_ask: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_steps: Vec<NativeWorkflowStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub return_contract: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guardrails: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    pub confidence: f32,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerGate {
@@ -459,6 +543,11 @@ pub struct ServerDossier {
     pub format_version: u32,
     pub server: MCPServerProfile,
     pub runtime_tools: Vec<RuntimeTool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_validations: Vec<RuntimeValidationSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_skills: Vec<WorkflowSkillSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_dossiers: Vec<ToolDossier>,
     pub server_gate: ServerGate,
     pub gate_reasons: Vec<String>,

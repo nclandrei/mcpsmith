@@ -26,8 +26,8 @@ impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             preference: ConvertBackendPreference::Auto,
-            timeout_seconds: 90,
-            chunk_size: 8,
+            timeout_seconds: 240,
+            chunk_size: 4,
         }
     }
 }
@@ -77,7 +77,7 @@ struct LegacyConvertConfig {
 }
 
 fn default_convert_backend_timeout_seconds() -> u64 {
-    90
+    240
 }
 
 fn default_convert_backend_chunk_size() -> usize {
@@ -188,8 +188,8 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.backend.preference, ConvertBackendPreference::Auto);
-        assert_eq!(config.backend.timeout_seconds, 90);
-        assert_eq!(config.backend.chunk_size, 8);
+        assert_eq!(config.backend.timeout_seconds, 240);
+        assert_eq!(config.backend.chunk_size, 4);
         assert_eq!(config.probe.timeout_seconds, 30);
         assert_eq!(config.probe.retries, 0);
         assert!(!config.probe.allow_side_effects);

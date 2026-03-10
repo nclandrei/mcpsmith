@@ -1,6 +1,7 @@
 use crate::{
-    ConfigSource, ConversionRecommendation, ConvertInventory, MCPServerProfile, PermissionLevel,
-    SourceEvidenceLevel, SourceGrounding, SourceKind,
+    ConfigSource, ConversionRecommendation, ConvertInventory, DerivationEvidence,
+    DerivationEvidenceKind, MCPServerProfile, PermissionLevel, SourceEvidenceLevel,
+    SourceGrounding, SourceKind,
 };
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -8,6 +9,7 @@ use chrono::Utc;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertInventory> {
@@ -401,6 +403,15 @@ fn inspect_local_source(entrypoint: &Path, grounding: &mut SourceGrounding) {
     if entrypoint.exists() {
         grounding.inspected = true;
         grounding.inspected_paths.push(entrypoint.to_path_buf());
+        if let Ok(raw) = std::fs::read_to_string(entrypoint) {
+            record_derivation_evidence(
+                grounding,
+                DerivationEvidenceKind::EntrypointSnippet,
+                entrypoint.display().to_string(),
+                &raw,
+            );
+        }
+        inspect_local_command_help(entrypoint, grounding);
     }
 
     let Some(start_dir) = entrypoint.parent() else {
@@ -412,6 +423,17 @@ fn inspect_local_source(entrypoint: &Path, grounding: &mut SourceGrounding) {
     }
     if let Some(pyproject) = find_upwards(start_dir, "pyproject.toml", 6) {
         merge_pyproject_metadata(grounding, &pyproject);
+    }
+    if let Some(readme) = find_readme(start_dir, 6)
+        && let Ok(raw) = std::fs::read_to_string(&readme)
+    {
+        record_source_inspection(grounding, Some(&readme), None);
+        record_derivation_evidence(
+            grounding,
+            DerivationEvidenceKind::ReadmeSnippet,
+            readme.display().to_string(),
+            &raw,
+        );
     }
 }
 
@@ -482,7 +504,27 @@ fn merge_package_json_text(
     };
 
     record_source_inspection(grounding, source_path, source_url);
+    record_derivation_evidence(
+        grounding,
+        DerivationEvidenceKind::ManifestSnippet,
+        source_path
+            .map(|path| path.display().to_string())
+            .or_else(|| source_url.map(ToString::to_string))
+            .unwrap_or_else(|| "package.json".to_string()),
+        raw,
+    );
     merge_package_json_object(grounding, obj);
+    if let Some(readme) = obj.get("readme").and_then(Value::as_str) {
+        record_derivation_evidence(
+            grounding,
+            DerivationEvidenceKind::ReadmeSnippet,
+            source_path
+                .map(|path| path.display().to_string())
+                .or_else(|| source_url.map(ToString::to_string))
+                .unwrap_or_else(|| "package.json#readme".to_string()),
+            readme,
+        );
+    }
 }
 
 fn merge_package_json_object(
@@ -517,6 +559,15 @@ fn merge_pyproject_text(
     };
 
     record_source_inspection(grounding, source_path, source_url);
+    record_derivation_evidence(
+        grounding,
+        DerivationEvidenceKind::ManifestSnippet,
+        source_path
+            .map(|path| path.display().to_string())
+            .or_else(|| source_url.map(ToString::to_string))
+            .unwrap_or_else(|| "pyproject.toml".to_string()),
+        raw,
+    );
     merge_pyproject_value(grounding, &root);
 }
 
@@ -575,6 +626,78 @@ fn record_source_inspection(
     }
 }
 
+fn record_derivation_evidence(
+    grounding: &mut SourceGrounding,
+    kind: DerivationEvidenceKind,
+    source: String,
+    raw: &str,
+) {
+    let excerpt = excerpt_text(raw, 900);
+    if excerpt.is_empty() {
+        return;
+    }
+    grounding.derivation_evidence.push(DerivationEvidence {
+        kind,
+        source,
+        excerpt,
+    });
+}
+
+fn excerpt_text(raw: &str, max_chars: usize) -> String {
+    let normalized = raw
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .take(24)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut chars = trimmed.chars();
+    let clipped = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{clipped}...")
+    } else {
+        clipped
+    }
+}
+
+fn find_readme(start_dir: &Path, max_levels: usize) -> Option<PathBuf> {
+    const CANDIDATES: [&str; 5] = ["README.md", "Readme.md", "readme.md", "README", "readme"];
+
+    start_dir.ancestors().take(max_levels).find_map(|dir| {
+        CANDIDATES
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.exists())
+    })
+}
+
+fn inspect_local_command_help(entrypoint: &Path, grounding: &mut SourceGrounding) {
+    for arg in ["--help", "-h"] {
+        let Ok(output) = Command::new(entrypoint).arg(arg).output() else {
+            continue;
+        };
+        let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+        let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+        let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+            .trim()
+            .to_string();
+        if combined.is_empty() {
+            continue;
+        }
+        record_derivation_evidence(
+            grounding,
+            DerivationEvidenceKind::CliHelp,
+            format!("{} {}", entrypoint.display(), arg),
+            &combined,
+        );
+        break;
+    }
+}
+
 fn toml_string(value: Option<&toml::Value>) -> Option<String> {
     value
         .and_then(toml::Value::as_str)
@@ -601,7 +724,10 @@ fn inspect_remote_npm_package(package_name: &str, grounding: &mut SourceGroundin
         format!("{}/{}", base.trim_end_matches('/'), encoded_name)
     };
 
-    let Some(root) = fetch_remote_json(&endpoint, Some("application/json")) else {
+    let Some(body) = fetch_remote_text(&endpoint, Some("application/json")) else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&body) else {
         return;
     };
 
@@ -615,8 +741,13 @@ fn inspect_remote_npm_package(package_name: &str, grounding: &mut SourceGroundin
         return;
     };
 
-    record_source_inspection(grounding, None, Some(&endpoint));
-    merge_package_json_object(grounding, obj);
+    match serde_json::to_string_pretty(&manifest) {
+        Ok(raw) => merge_package_json_text(grounding, &raw, None, Some(&endpoint)),
+        Err(_) => {
+            record_source_inspection(grounding, None, Some(&endpoint));
+            merge_package_json_object(grounding, obj);
+        }
+    }
 }
 
 fn select_npm_manifest(root: &Value, grounding: &mut SourceGrounding) -> Value {
@@ -703,6 +834,14 @@ fn merge_pypi_info_object(grounding: &mut SourceGrounding, info: &serde_json::Ma
         )
         .or_else(|| json_string(info.get("project_url")));
     }
+    if let Some(description) = json_string(info.get("description")) {
+        record_derivation_evidence(
+            grounding,
+            DerivationEvidenceKind::RemoteDocSnippet,
+            "pypi:description".to_string(),
+            &description,
+        );
+    }
 }
 
 fn project_urls_value(value: Option<&Value>, keys: &[&str]) -> Option<String> {
@@ -751,13 +890,39 @@ fn inspect_remote_repository_manifest(grounding: &mut SourceGrounding) {
             break;
         }
     }
+
+    for readme in ["README.md", "Readme.md", "readme.md"] {
+        let endpoint = format!(
+            "{}/repos/{owner}/{repo}/contents/{readme}",
+            base.trim_end_matches('/')
+        );
+        let Some(raw) = fetch_github_contents(&endpoint) else {
+            continue;
+        };
+        record_source_inspection(grounding, None, Some(&endpoint));
+        record_derivation_evidence(
+            grounding,
+            DerivationEvidenceKind::ReadmeSnippet,
+            endpoint,
+            &raw,
+        );
+        break;
+    }
 }
 
 fn needs_repository_manifest_inspection(grounding: &SourceGrounding) -> bool {
     grounding.repository_url.is_some()
         && (grounding.package_name.is_none()
             || grounding.package_version.is_none()
-            || grounding.homepage.is_none())
+            || grounding.homepage.is_none()
+            || !grounding.derivation_evidence.iter().any(|item| {
+                matches!(
+                    item.kind,
+                    DerivationEvidenceKind::ReadmeSnippet
+                        | DerivationEvidenceKind::RemoteDocSnippet
+                        | DerivationEvidenceKind::CliHelp
+                )
+            }))
 }
 
 fn parse_github_repo(url: &str) -> Option<(String, String)> {
@@ -968,6 +1133,13 @@ fn finalize_source_grounding(mut grounding: SourceGrounding) -> SourceGrounding 
     grounding.inspected_paths.dedup();
     grounding.inspected_urls.sort();
     grounding.inspected_urls.dedup();
+    grounding.derivation_evidence.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.excerpt.cmp(&right.excerpt))
+    });
+    grounding.derivation_evidence.dedup();
 
     grounding.evidence_level = if grounding.inspected {
         SourceEvidenceLevel::SourceInspected
@@ -1372,7 +1544,18 @@ mod tests {
         let bin_dir = tool_root.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let executable = bin_dir.join("server.sh");
-        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--help\" ] || [ \"$1\" = \"-h\" ]; then\n  echo 'Usage: server.sh --help'\n  exit 0\nfi\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&executable).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&executable, perms).unwrap();
+        }
         std::fs::write(
             tool_root.join("package.json"),
             r#"{
@@ -1384,6 +1567,11 @@ mod tests {
     "url": "https://github.com/acme/local-mcp"
   }
 }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tool_root.join("README.md"),
+            "# Local MCP\n\nUse `server.sh --help` to inspect available commands.\n",
         )
         .unwrap();
 
@@ -1420,18 +1608,59 @@ mod tests {
             server.source_grounding.package_name.as_deref(),
             Some("@acme/local-mcp")
         );
+        assert!(
+            server
+                .source_grounding
+                .derivation_evidence
+                .iter()
+                .any(|item| {
+                    item.kind == DerivationEvidenceKind::ManifestSnippet
+                        && item.source.ends_with("package.json")
+                })
+        );
+        assert!(
+            server
+                .source_grounding
+                .derivation_evidence
+                .iter()
+                .any(|item| {
+                    item.kind == DerivationEvidenceKind::ReadmeSnippet
+                        && item.source.ends_with("README.md")
+                })
+        );
+        assert!(
+            server
+                .source_grounding
+                .derivation_evidence
+                .iter()
+                .any(|item| {
+                    item.kind == DerivationEvidenceKind::CliHelp
+                        && item.source.contains("server.sh --help")
+                })
+        );
     }
 
     #[test]
     fn discover_enriches_npm_package_from_remote_registry() {
         let _guard = source_env_lock().lock().unwrap();
-        let server = spawn_http_server(vec![(
-            "/%40playwright%2Fmcp",
-            "200 OK",
-            r#"{"dist-tags":{"latest":"1.55.0"},"versions":{"1.55.0":{"name":"@playwright/mcp","version":"1.55.0","homepage":"https://playwright.dev","repository":{"url":"https://github.com/microsoft/playwright-mcp"}}}}"#,
-        )]);
+        let readme = base64::engine::general_purpose::STANDARD
+            .encode("# Playwright MCP\n\nUse the native browser tooling documented here.\n");
+        let readme_body = format!(r#"{{"encoding":"base64","content":"{readme}"}}"#);
+        let server = spawn_http_server(vec![
+            (
+                "/%40playwright%2Fmcp",
+                "200 OK",
+                r##"{"dist-tags":{"latest":"1.55.0"},"versions":{"1.55.0":{"name":"@playwright/mcp","version":"1.55.0","homepage":"https://playwright.dev","repository":{"url":"https://github.com/microsoft/playwright-mcp"},"readme":"# Playwright MCP\n\nUse the native browser tooling documented here.\n"}}}"##,
+            ),
+            (
+                "/repos/microsoft/playwright-mcp/contents/README.md",
+                "200 OK",
+                Box::leak(readme_body.into_boxed_str()),
+            ),
+        ]);
         let _fetch = EnvVarGuard::set("MCPSMITH_SOURCE_FETCH", "1");
         let _registry = EnvVarGuard::set("MCPSMITH_NPM_REGISTRY_BASE_URL", &server);
+        let _github = EnvVarGuard::set("MCPSMITH_GITHUB_API_BASE_URL", &server);
 
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("settings.json");
@@ -1471,7 +1700,26 @@ mod tests {
             server.source_grounding.repository_url.as_deref(),
             Some("https://github.com/microsoft/playwright-mcp")
         );
-        assert_eq!(server.source_grounding.inspected_urls.len(), 1);
+        assert!(
+            server
+                .source_grounding
+                .inspected_urls
+                .iter()
+                .any(|url| { url.contains("/%40playwright%2Fmcp") })
+        );
+        assert!(
+            server
+                .source_grounding
+                .derivation_evidence
+                .iter()
+                .any(|item| {
+                    item.kind == DerivationEvidenceKind::ReadmeSnippet
+                        && (item.source.contains("/%40playwright%2Fmcp")
+                            || item
+                                .source
+                                .contains("/repos/microsoft/playwright-mcp/contents/README.md"))
+                })
+        );
     }
 
     #[test]
@@ -1532,11 +1780,21 @@ mod tests {
             r#"{"name":"repo-mcp","version":"2.0.0","homepage":"https://example.com/repo-mcp"}"#,
         );
         let body = format!(r#"{{"encoding":"base64","content":"{content}"}}"#);
-        let server = spawn_http_server(vec![(
-            "/repos/acme/repo-mcp/contents/package.json",
-            "200 OK",
-            Box::leak(body.into_boxed_str()),
-        )]);
+        let readme = base64::engine::general_purpose::STANDARD
+            .encode("# Repo MCP\n\nUse native commands described here.\n");
+        let readme_body = format!(r#"{{"encoding":"base64","content":"{readme}"}}"#);
+        let server = spawn_http_server(vec![
+            (
+                "/repos/acme/repo-mcp/contents/package.json",
+                "200 OK",
+                Box::leak(body.into_boxed_str()),
+            ),
+            (
+                "/repos/acme/repo-mcp/contents/README.md",
+                "200 OK",
+                Box::leak(readme_body.into_boxed_str()),
+            ),
+        ]);
         let _fetch = EnvVarGuard::set("MCPSMITH_SOURCE_FETCH", "1");
         let _github = EnvVarGuard::set("MCPSMITH_GITHUB_API_BASE_URL", &server);
 
@@ -1584,6 +1842,18 @@ mod tests {
                 .inspected_urls
                 .iter()
                 .any(|url| url.contains("/repos/acme/repo-mcp/contents/package.json"))
+        );
+        assert!(
+            server
+                .source_grounding
+                .derivation_evidence
+                .iter()
+                .any(|item| {
+                    item.kind == DerivationEvidenceKind::ReadmeSnippet
+                        && item
+                            .source
+                            .contains("/repos/acme/repo-mcp/contents/README.md")
+                })
         );
     }
 }

@@ -1,10 +1,10 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "generated_at": "2026-03-09T00:00:00Z",
   "dossiers": [
     {
       "generated_at": "2026-03-09T00:00:00Z",
-      "format_version": 5,
+      "format_version": 6,
       "server": {
         "id": "custom-1:memory",
         "name": "memory",
@@ -42,18 +42,9 @@
           }
         }
       ],
-      "tool_dossiers": [
+      "runtime_validations": [
         {
-          "name": "read_graph",
-          "explanation": "Read the graph state and inspect the returned entities and relations.",
-          "recipe": [
-            "Run the tool with an empty object.",
-            "Inspect the returned graph payload."
-          ],
-          "evidence": [
-            "live smoke fixture"
-          ],
-          "confidence": 0.9,
+          "tool_name": "read_graph",
           "contract_tests": [
             {
               "probe": "happy-path",
@@ -78,6 +69,44 @@
             "happy_path": {}
           },
           "probe_input_source": "backend"
+        }
+      ],
+      "workflow_skills": [
+        {
+          "id": "inspect-memory-graph",
+          "title": "Inspect memory graph",
+          "goal": "Read the local memory graph without relying on the MCP server.",
+          "when_to_use": "Use this when you need the current memory graph contents.",
+          "trigger_phrases": [
+            "read memory graph",
+            "inspect stored memory"
+          ],
+          "origin_tools": [
+            "read_graph"
+          ],
+          "stop_and_ask": [
+            "Stop if you cannot determine which local memory store should be read safely."
+          ],
+          "native_steps": [
+            {
+              "title": "Inspect the local graph store",
+              "command": "python3 - <<'PY'\nprint('inspect the configured memory graph backing store here')\nPY",
+              "details": "Replace the placeholder inspection command with the concrete local storage read path for the target environment."
+            }
+          ],
+          "verification": [
+            "Confirm the command completed successfully and returned graph content."
+          ],
+          "return_contract": [
+            "Return the graph output or file path together with the backing store you inspected."
+          ],
+          "guardrails": [
+            "Do not mutate the local memory store while inspecting it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
         }
       ],
       "server_gate": "ready",

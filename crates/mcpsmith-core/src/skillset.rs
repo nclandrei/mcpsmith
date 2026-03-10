@@ -1,11 +1,11 @@
 use crate::{
     BuildResult, BuildServerResult, CapabilityPlaybook, ConvertPlan, DossierBundle,
     MCPServerProfile, ManifestToolSkill, ServerDossier, ServerGate, SkillParityManifest,
-    ToolDossier, ToolSkillHint,
+    ToolSkillHint, WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,12 @@ pub fn build_from_bundle(
     skills_dir: Option<PathBuf>,
 ) -> Result<BuildResult> {
     for dossier in &bundle.dossiers {
+        if dossier.workflow_skills.is_empty() && !dossier.tool_dossiers.is_empty() {
+            bail!(
+                "Legacy tool-dossier bundle '{}' cannot build standalone skills; re-run `mcpsmith discover` with the current version.",
+                dossier.server.id
+            );
+        }
         if dossier.server_gate == ServerGate::Blocked {
             let reasons = if dossier.gate_reasons.is_empty() {
                 "no gate reason recorded".to_string()
@@ -61,28 +67,45 @@ pub(crate) fn write_server_skills(
         .with_context(|| format!("Failed to create {}", orchestrator_dir.display()))?;
 
     let mut tool_skill_paths = vec![];
-    let mut tool_refs = vec![];
+    let mut workflow_files = BTreeMap::new();
     let mut manifest_tool_skills = vec![];
-    for tool in &dossier.tool_dossiers {
-        let tool_slug = sanitize_slug(&tool.name);
-        let dir_name = format!("{server_slug}--{tool_slug}");
+    let mut slug_counts = BTreeMap::<String, usize>::new();
+    for workflow in &dossier.workflow_skills {
+        let base_slug = sanitize_slug(&workflow.id);
+        let counter = slug_counts.entry(base_slug.clone()).or_insert(0);
+        let workflow_slug = if *counter == 0 {
+            base_slug.clone()
+        } else {
+            format!("{base_slug}-{}", *counter + 1)
+        };
+        *counter += 1;
+
+        let dir_name = format!("{server_slug}--{workflow_slug}");
         let path = root.join(&dir_name).join("SKILL.md");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
-        let body = render_tool_skill_markdown(dossier, tool);
+        let body = render_workflow_skill_markdown(dossier, workflow);
         fs::write(&path, body)
-            .with_context(|| format!("Failed to write tool skill {}", path.display()))?;
+            .with_context(|| format!("Failed to write workflow skill {}", path.display()))?;
         tool_skill_paths.push(path.clone());
-        tool_refs.push((tool.name.clone(), format!("../{dir_name}/SKILL.md")));
-        manifest_tool_skills.push(ManifestToolSkill {
-            tool_name: normalize_tool_name(&tool.name),
-            skill_file: format!("../{dir_name}/SKILL.md"),
-        });
+        workflow_files.insert(workflow.id.clone(), format!("../{dir_name}/SKILL.md"));
+
+        let coverage = if workflow.origin_tools.is_empty() {
+            vec![workflow.id.clone()]
+        } else {
+            workflow.origin_tools.clone()
+        };
+        for tool_name in coverage {
+            manifest_tool_skills.push(ManifestToolSkill {
+                tool_name: normalize_tool_name(&tool_name),
+                skill_file: format!("../{dir_name}/SKILL.md"),
+            });
+        }
     }
 
-    let orchestrator = render_orchestrator_v3_markdown(dossier, &tool_refs);
+    let orchestrator = render_orchestrator_v3_markdown(dossier, &workflow_files);
     fs::write(&orchestrator_path, orchestrator).with_context(|| {
         format!(
             "Failed to write orchestrator skill {}",
@@ -97,7 +120,7 @@ pub(crate) fn write_server_skills(
         server_name: dossier.server.name.clone(),
         orchestrator_skill: Some("SKILL.md".to_string()),
         required_tools: dossier
-            .tool_dossiers
+            .runtime_tools
             .iter()
             .map(|tool| normalize_tool_name(&tool.name))
             .collect(),
@@ -107,7 +130,7 @@ pub(crate) fn write_server_skills(
     write_skill_manifest(&orchestrator_path, &manifest)?;
 
     let mut notes = vec![format!(
-        "Generated 1 orchestrator skill and {} tool skills.",
+        "Generated 1 orchestrator skill and {} workflow skills.",
         tool_skill_paths.len()
     )];
     notes.push("Wrote internal parity manifest for verify checks.".to_string());
@@ -119,35 +142,49 @@ pub(crate) fn write_server_skills(
 
 fn render_orchestrator_v3_markdown(
     dossier: &ServerDossier,
-    tool_refs: &[(String, String)],
+    workflow_files: &BTreeMap<String, String>,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Workflow: {}\n\n", dossier.server.name.trim()));
-    out.push_str("## Purpose\n\n");
+    out.push_str(&format!("# Skill: {}\n\n", dossier.server.name.trim()));
+    out.push_str("## Use This When\n\n");
     out.push_str(&format!("{}\n\n", dossier.server.purpose.trim()));
 
-    out.push_str("## Capability Skills\n\n");
-    if tool_refs.is_empty() {
-        out.push_str("- No tool skills available.\n\n");
+    out.push_str("## How To Route Requests\n\n");
+    out.push_str(
+        "1. Match the user request to the workflow whose goal and trigger phrases fit best.\n",
+    );
+    out.push_str("2. If required context is missing, use the workflow's context-acquisition guidance before running commands.\n");
+    out.push_str(
+        "3. If a workflow lists prerequisite workflows, run those sibling workflows first.\n",
+    );
+    out.push_str("4. Finish by following the workflow's verification and return-contract sections before reporting success.\n\n");
+
+    out.push_str("## Workflow Skills\n\n");
+    if dossier.workflow_skills.is_empty() {
+        out.push_str("- No standalone workflows are available.\n\n");
     } else {
-        for (tool, file) in tool_refs {
+        for workflow in &dossier.workflow_skills {
+            let file = workflow_files
+                .get(&workflow.id)
+                .map(String::as_str)
+                .unwrap_or("SKILL.md");
             let skill_name = installed_skill_reference_name(file);
-            out.push_str(&format!("- `${skill_name}` for `{tool}`.\n"));
+            out.push_str(&format!(
+                "- `${skill_name}`: {}\n",
+                concise_sentence(&workflow.when_to_use)
+            ));
         }
         out.push('\n');
     }
 
-    out.push_str("## Flow\n\n");
-    out.push_str("1. Confirm user intent and choose the minimum capability skills needed.\n");
-    out.push_str("2. Execute one tool skill at a time and keep outputs deterministic.\n");
-    out.push_str("3. Validate outcomes after each step; stop on mismatch and report root cause.\n");
-    out.push_str(
-        "4. Ask for explicit confirmation before destructive or irreversible operations.\n\n",
-    );
+    out.push_str("## Shared Guardrails\n\n");
+    out.push_str("- Do not guess missing identifiers, paths, or simulator/project context.\n");
+    out.push_str("- Prefer the concrete native commands written in each workflow over improvising a different procedure.\n");
+    out.push_str("- Stop and ask the user before destructive or irreversible steps.\n\n");
 
     if dossier.server_gate == ServerGate::Blocked {
         out.push_str("## Gate Status\n\n");
-        out.push_str("Server conversion is currently blocked:\n");
+        out.push_str("Standalone conversion is currently blocked:\n");
         for reason in &dossier.gate_reasons {
             out.push_str(&format!("- {}\n", reason));
         }
@@ -156,56 +193,123 @@ fn render_orchestrator_v3_markdown(
     out
 }
 
-fn render_tool_skill_markdown(dossier: &ServerDossier, tool: &ToolDossier) -> String {
+fn render_workflow_skill_markdown(dossier: &ServerDossier, workflow: &WorkflowSkillSpec) -> String {
+    let server_slug = sanitize_slug(&dossier.server.name);
     let mut out = String::new();
-    out.push_str(&format!("# Capability: {}\n\n", tool.name));
-    out.push_str("## What It Does\n\n");
-    out.push_str(&format!("{}\n\n", tool.explanation.trim()));
+    out.push_str(&format!("# Skill: {}\n\n", workflow.title.trim()));
+    out.push_str("## Use This When\n\n");
+    out.push_str(&format!("{}\n\n", workflow.when_to_use.trim()));
 
-    out.push_str("## Recipe\n\n");
-    if tool.recipe.is_empty() {
-        out.push_str("1. Validate inputs and preconditions.\n");
-        out.push_str("2. Execute the operation and capture output.\n");
-        out.push_str("3. Validate result and report outcome.\n\n");
-    } else {
-        for (idx, step) in tool.recipe.iter().enumerate() {
-            out.push_str(&format!("{}. {}\n", idx + 1, step));
+    out.push_str("## Goal\n\n");
+    out.push_str(&format!("{}\n\n", workflow.goal.trim()));
+
+    if !workflow.trigger_phrases.is_empty() {
+        out.push_str("## Trigger Phrases\n\n");
+        for phrase in &workflow.trigger_phrases {
+            out.push_str(&format!("- {}\n", phrase));
         }
         out.push('\n');
     }
 
-    out.push_str("## Contract Tests\n\n");
-    for test in &tool.contract_tests {
-        let applicability = if test.applicable {
-            "required"
-        } else {
-            "optional"
-        };
-        out.push_str(&format!(
-            "- `{}` ({applicability}): {}. Method: {}\n",
-            test.probe, test.expected, test.method
-        ));
+    if !workflow.required_context.is_empty() {
+        out.push_str("## Required Context\n\n");
+        for input in &workflow.required_context {
+            out.push_str(&format!(
+                "- `{}`: {}\n",
+                input.name.trim(),
+                concise_sentence(&input.guidance)
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !workflow.context_acquisition.is_empty() {
+        out.push_str("## If Context Is Missing\n\n");
+        for item in &workflow.context_acquisition {
+            out.push_str(&format!("- {}\n", item));
+        }
+        out.push('\n');
+    }
+
+    if !workflow.prerequisite_workflows.is_empty() || !workflow.followup_workflows.is_empty() {
+        out.push_str("## Related Skills\n\n");
+        for prerequisite in &workflow.prerequisite_workflows {
+            out.push_str(&format!(
+                "- Prerequisite: `${server_slug}--{}`\n",
+                sanitize_slug(prerequisite)
+            ));
+        }
+        for followup in &workflow.followup_workflows {
+            out.push_str(&format!(
+                "- Follow-up: `${server_slug}--{}`\n",
+                sanitize_slug(followup)
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Native Steps\n\n");
+    for (idx, step) in workflow.native_steps.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n\n", idx + 1, step.title.trim()));
+        out.push_str("```bash\n");
+        out.push_str(step.command.trim());
+        out.push_str("\n```\n");
+        if let Some(details) = step
+            .details
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            out.push_str(details);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    if !workflow.branching_rules.is_empty() {
+        out.push_str("## Branching Rules\n\n");
+        for rule in &workflow.branching_rules {
+            out.push_str(&format!("- {}\n", rule));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Verification\n\n");
+    for item in &workflow.verification {
+        out.push_str(&format!("- {}\n", item));
     }
     out.push('\n');
 
-    out.push_str("## Evidence\n\n");
-    if tool.evidence.is_empty() {
-        out.push_str("- Runtime metadata + contract checks (source not available).\n");
+    out.push_str("## What To Return\n\n");
+    for item in &workflow.return_contract {
+        out.push_str(&format!("- {}\n", item));
+    }
+    out.push('\n');
+
+    out.push_str("## Stop And Ask\n\n");
+    for item in &workflow.stop_and_ask {
+        out.push_str(&format!("- {}\n", item));
+    }
+    out.push('\n');
+
+    out.push_str("## Guardrails\n\n");
+    if workflow.guardrails.is_empty() {
+        out.push_str("- Keep the workflow deterministic and avoid destructive improvisation.\n");
     } else {
-        for evidence in &tool.evidence {
-            out.push_str(&format!("- {}\n", evidence));
+        for item in &workflow.guardrails {
+            out.push_str(&format!("- {}\n", item));
         }
     }
     out.push('\n');
 
-    out.push_str("## Confidence\n\n");
-    out.push_str(&format!("- {:.2}\n\n", tool.confidence.clamp(0.0, 1.0)));
+    out.push_str("## Evidence\n\n");
+    for evidence in &workflow.evidence {
+        out.push_str(&format!("- {}\n", evidence));
+    }
+    out.push('\n');
 
-    out.push_str("## Scope\n\n");
-    out.push_str(&format!(
-        "- Generated from `{}` dossier entry.\n",
-        dossier.server.id
-    ));
+    out.push_str("## Confidence\n\n");
+    out.push_str(&format!("- {:.2}\n", workflow.confidence.clamp(0.0, 1.0)));
 
     out
 }
@@ -325,7 +429,6 @@ fn capability_playbooks(
     fallback_actions: &[String],
     introspected_tools: Option<&[String]>,
 ) -> Vec<CapabilityPlaybook> {
-    let name = server.name.to_lowercase();
     let purpose = server.purpose.clone();
     let introspected_set = introspected_tools
         .map(|items| {
@@ -336,132 +439,14 @@ fn capability_playbooks(
         })
         .unwrap_or_default();
 
-    if name.contains("xcodebuildmcp") || name.contains("xcode") {
-        return vec![
-            CapabilityPlaybook {
-                title: "Build and launch in simulator".to_string(),
-                goal: "Compile and run iOS code paths quickly during iteration.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__XcodeBuildMCP__build_run_sim".to_string(),
-                        "mcp__XcodeBuildMCP__launch_app_sim".to_string(),
-                        "mcp__XcodeBuildMCP__list_sims".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "List available simulators and choose target device/OS.".to_string(),
-                    "Build and run in simulator with project defaults.".to_string(),
-                    "Capture immediate app behavior and regressions before deeper debugging."
-                        .to_string(),
-                ],
-            },
-            CapabilityPlaybook {
-                title: "UI interaction and visual checks".to_string(),
-                goal: "Drive screens deterministically and confirm UI state.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__XcodeBuildMCP__snapshot_ui".to_string(),
-                        "mcp__XcodeBuildMCP__tap".to_string(),
-                        "mcp__XcodeBuildMCP__type_text".to_string(),
-                        "mcp__XcodeBuildMCP__screenshot".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "Take a UI snapshot to identify accessible targets.".to_string(),
-                    "Trigger interactions by accessibility id/label first, coordinates last."
-                        .to_string(),
-                    "Capture screenshots for before/after evidence of state transitions."
-                        .to_string(),
-                ],
-            },
-            CapabilityPlaybook {
-                title: "Attach debugger and inspect failures".to_string(),
-                goal: "Investigate crashes, stuck flows, and state mismatches.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__XcodeBuildMCP__debug_attach_sim".to_string(),
-                        "mcp__XcodeBuildMCP__debug_stack".to_string(),
-                        "mcp__XcodeBuildMCP__debug_variables".to_string(),
-                        "mcp__XcodeBuildMCP__debug_lldb_command".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "Attach debugger to running app process.".to_string(),
-                    "Collect backtrace and inspect frame variables at failure point.".to_string(),
-                    "Apply fix and rerun the same flow to confirm closure.".to_string(),
-                ],
-            },
-        ];
-    }
-
-    if name.contains("chrome-devtools") || name.contains("devtools") || name.contains("chrome") {
-        return vec![
-            CapabilityPlaybook {
-                title: "Navigate and inspect page state".to_string(),
-                goal: "Understand DOM/accessibility state before automation actions.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__chrome-devtools__navigate_page".to_string(),
-                        "mcp__chrome-devtools__take_snapshot".to_string(),
-                        "mcp__chrome-devtools__click".to_string(),
-                        "mcp__chrome-devtools__fill".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "Open target URL and wait for primary content.".to_string(),
-                    "Capture a text snapshot and locate stable element identifiers.".to_string(),
-                    "Perform interactions and re-snapshot to validate results.".to_string(),
-                ],
-            },
-            CapabilityPlaybook {
-                title: "Trace network and console failures".to_string(),
-                goal: "Root-cause runtime errors and bad responses.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__chrome-devtools__list_network_requests".to_string(),
-                        "mcp__chrome-devtools__get_network_request".to_string(),
-                        "mcp__chrome-devtools__list_console_messages".to_string(),
-                        "mcp__chrome-devtools__get_console_message".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "List recent network requests and inspect failing responses.".to_string(),
-                    "Collect console errors and correlate them with failing endpoints.".to_string(),
-                    "Re-run interaction after fix to verify errors disappear.".to_string(),
-                ],
-            },
-            CapabilityPlaybook {
-                title: "Run performance diagnostics".to_string(),
-                goal: "Capture page performance issues and actionable insights.".to_string(),
-                tool_hints: filter_hints_by_introspection(
-                    vec![
-                        "mcp__chrome-devtools__performance_start_trace".to_string(),
-                        "mcp__chrome-devtools__performance_stop_trace".to_string(),
-                        "mcp__chrome-devtools__performance_analyze_insight".to_string(),
-                    ],
-                    &introspected_set,
-                ),
-                steps: vec![
-                    "Start trace recording for the target journey.".to_string(),
-                    "Stop trace and inspect key insights (latency, LCP breakdown, etc.)."
-                        .to_string(),
-                    "Prioritize fixes and rerun trace to measure impact.".to_string(),
-                ],
-            },
-        ];
-    }
-
     let mut steps = vec![
-        "Confirm MCP server availability and auth prerequisites.".to_string(),
         format!(
-            "Use MCP tools to execute {} tasks with explicit checks.",
-            purpose
+            "Identify the concrete workflow needed for {}.",
+            purpose.to_lowercase()
         ),
+        "Collect only the context the selected workflow actually needs.".to_string(),
+        "Run the selected workflow deterministically and verify the result before moving on."
+            .to_string(),
     ];
     steps.extend(fallback_actions.iter().cloned());
 
@@ -486,20 +471,6 @@ fn capability_playbooks(
         tool_hints: fallback_hints,
         steps,
     }]
-}
-
-fn filter_hints_by_introspection(
-    hints: Vec<String>,
-    introspected: &BTreeSet<String>,
-) -> Vec<String> {
-    if introspected.is_empty() {
-        return hints;
-    }
-    hints
-        .iter()
-        .filter(|hint| introspected.contains(&hint_to_tool_name(hint)))
-        .cloned()
-        .collect::<Vec<_>>()
 }
 
 pub(crate) fn required_tool_hints(
@@ -652,13 +623,18 @@ fn installed_skill_reference_name(reference: &str) -> String {
         .to_string()
 }
 
+fn concise_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.")
+    }
+}
+
 fn tool_hint_prefix(server: &MCPServerProfile) -> String {
-    let lower = server.name.to_lowercase();
-    if lower.contains("xcodebuildmcp") {
-        return "mcp__XcodeBuildMCP__".to_string();
-    }
-    if lower.contains("chrome-devtools") || lower.contains("devtools") {
-        return "mcp__chrome-devtools__".to_string();
-    }
     format!("mcp__{}__", server.name)
 }

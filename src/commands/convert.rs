@@ -301,6 +301,7 @@ fn print_discover_bundle(bundle: &convert::DossierBundle) {
         println!("  gate      : {:?}", dossier.server_gate);
         println!("  backend   : {}", dossier.backend_used);
         println!("  tools     : {}", dossier.runtime_tools.len());
+        println!("  workflows : {}", dossier.workflow_skills.len());
         if dossier.backend_fallback_used {
             println!("  fallback  : used");
         }
@@ -318,7 +319,7 @@ fn print_build_result(result: &convert::BuildResult) {
             "  orchestrator : {}",
             server.orchestrator_skill_path.display()
         );
-        println!("  tool_skills  : {}", server.tool_skill_paths.len());
+        println!("  workflows    : {}", server.tool_skill_paths.len());
     }
 }
 
@@ -349,7 +350,7 @@ fn print_apply_v3_result(result: &convert::ApplyResultV3) {
             "  orchestrator   : {}",
             server.orchestrator_skill_path.display()
         );
-        println!("  tool_skills    : {}", server.tool_skill_paths.len());
+        println!("  workflows      : {}", server.tool_skill_paths.len());
         if let Some(backup) = &server.mcp_config_backup {
             println!("  backup         : {}", backup.display());
         }

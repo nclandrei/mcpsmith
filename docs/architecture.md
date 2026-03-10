@@ -52,7 +52,8 @@ development flows can override backend executables with
 `MCPSMITH_CODEX_COMMAND` and `MCPSMITH_CLAUDE_COMMAND`.
 
 Backends never replace runtime truth. They enrich runtime metadata into
-tool-level dossiers, recipes, evidence, and contract-test expectations.
+standalone workflow specs, native steps, evidence, and contract-test
+expectations.
 
 ## Source grounding
 
@@ -79,8 +80,8 @@ fed into backend prompts so dossier evidence can distinguish
 For each server bundle it writes:
 
 - one orchestrator skill directory: `<server-slug>/SKILL.md`
-- one capability skill directory per runtime tool:
-  `<server-slug>--<tool-slug>/SKILL.md`
+- one workflow skill directory per standalone workflow:
+  `<server-slug>--<workflow-slug>/SKILL.md`
 - one hidden parity manifest:
   `<server-slug>/.mcpsmith/manifest.json`
 
@@ -111,5 +112,5 @@ Safe defaults matter. Side-effectful probes stay off unless explicitly allowed.
 
 If config mutation fails after skills were written, `apply` rolls the generated
 skill directories back so the conversion remains atomic. `verify` can then be
-used later to confirm that the generated skills still match the live server's
+used later to confirm that the generated skills still cover the live server's
 runtime tool list.

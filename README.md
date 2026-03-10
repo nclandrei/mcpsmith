@@ -11,8 +11,8 @@ This repo is the standalone product. `distill` is historical context only.
 
 ## What mcpsmith does
 
-- Turns one MCP server into one orchestrator skill plus one capability skill per
-  runtime tool.
+- Turns one MCP server into one orchestrator skill plus a standalone workflow
+  skill pack synthesized from live runtime evidence.
 - Uses live MCP introspection and probes as the final gate before config
   mutation.
 - Supports one-shot replacement or a stepwise dossier-driven workflow.
@@ -28,7 +28,7 @@ This repo is the standalone product. `distill` is historical context only.
 2. Introspect the selected server with real `initialize` and `tools/list`
    requests.
 3. Resolve backend selection and ask `codex` or `claude` to turn runtime
-   metadata plus source evidence into tool dossiers.
+   metadata plus source evidence into standalone workflow specs.
 4. Build installed skills from that dossier bundle.
 5. Run `contract-test` against the live server with real `tools/call` probes.
 6. Apply atomically: rebuild, rerun the contract gate, write skills, back up the
@@ -107,8 +107,8 @@ Canonical app config shape:
 ```yaml
 backend:
   preference: auto
-  timeout_seconds: 90
-  chunk_size: 8
+  timeout_seconds: 240
+  chunk_size: 4
 
 probe:
   timeout_seconds: 30
@@ -168,7 +168,7 @@ Sample artifacts live under [`examples/`](examples):
 - [`examples/sample-mcp-config.json`](examples/sample-mcp-config.json): minimal
   MCP config fixture used for isolated runs.
 - [`examples/sample-dossier.json`](examples/sample-dossier.json): discovery
-  output with one server dossier and one tool dossier.
+  output with one server dossier and one standalone workflow skill.
 - [`examples/sample-contract-report.json`](examples/sample-contract-report.json):
   contract-test report showing executed and skipped probes.
 - [`examples/sample-skill-pack-tree.txt`](examples/sample-skill-pack-tree.txt):

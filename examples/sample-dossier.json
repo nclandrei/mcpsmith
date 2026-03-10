@@ -1,10 +1,10 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "generated_at": "2026-03-10T09:00:00Z",
   "dossiers": [
     {
       "generated_at": "2026-03-10T09:00:00Z",
-      "format_version": 5,
+      "format_version": 6,
       "server": {
         "id": "custom-1:playwright",
         "name": "playwright",
@@ -49,23 +49,9 @@
           }
         }
       ],
-      "tool_dossiers": [
+      "runtime_validations": [
         {
-          "name": "execute",
-          "explanation": "Run execute",
-          "recipe": [
-            "validate input",
-            "execute execute",
-            "verify output"
-          ],
-          "evidence": [
-            "evidence-level: source-inspected",
-            "runtime metadata",
-            "runtime-command: /tmp/mcpsmith-demo/mock-mcp.sh",
-            "runtime-tool-description: Tool execute",
-            "source-entrypoint: /tmp/mcpsmith-demo/mock-mcp.sh"
-          ],
-          "confidence": 0.9,
+          "tool_name": "execute",
           "contract_tests": [
             {
               "probe": "happy-path",
@@ -81,12 +67,72 @@
             },
             {
               "probe": "side-effect-safety",
-              "expected": "requires confirmation for mutations",
-              "method": "run check/dry-run first",
-              "applicable": true
+              "expected": "read-only fixture skips destructive paths",
+              "method": "skip destructive path for the read-only fixture",
+              "applicable": false
             }
           ],
-          "probe_input_source": "synthesized"
+          "probe_inputs": {
+            "happy_path": {
+              "query": "open https://example.com"
+            }
+          },
+          "probe_input_source": "backend"
+        }
+      ],
+      "workflow_skills": [
+        {
+          "id": "execute",
+          "title": "Run browser execute workflow",
+          "goal": "Run the browser helper flow without relying on the MCP server.",
+          "when_to_use": "Use this when you need to perform the execute workflow with a locally available command.",
+          "trigger_phrases": [
+            "run execute",
+            "perform browser action"
+          ],
+          "origin_tools": [
+            "execute"
+          ],
+          "required_context": [
+            {
+              "name": "query",
+              "guidance": "Collect the exact browser action or URL before running the command.",
+              "required": true
+            }
+          ],
+          "context_acquisition": [
+            "Ask for the missing query instead of guessing it."
+          ],
+          "branching_rules": [
+            "If the browser target or action is ambiguous, stop before running commands."
+          ],
+          "stop_and_ask": [
+            "Stop if the requested browser action could mutate state in an unexpected way."
+          ],
+          "native_steps": [
+            {
+              "title": "Run the local replacement command",
+              "command": "QUERY='open https://example.com'\nprintf '%s\\n' \"$QUERY\"",
+              "details": "Replace the sample QUERY value with the exact collected action before running the command."
+            }
+          ],
+          "verification": [
+            "Confirm the command completed successfully and echoed the requested action."
+          ],
+          "return_contract": [
+            "Return the command output together with the exact query value used."
+          ],
+          "guardrails": [
+            "Do not invent query values or hidden defaults."
+          ],
+          "evidence": [
+            "evidence-level: source-inspected",
+            "live sample fixture",
+            "runtime-command: /tmp/mcpsmith-demo/mock-mcp.sh",
+            "runtime-tool-description: Tool execute",
+            "source-entrypoint: /tmp/mcpsmith-demo/mock-mcp.sh"
+          ],
+          "confidence": 0.9
         }
       ],
       "server_gate": "ready",

@@ -5,7 +5,7 @@ use crate::skillset::normalize_tool_name;
 use crate::{
     ContractProbeResult, ContractServerReport, ContractTestOptions, ContractTestReport,
     ContractToolResult, DossierBundle, MCPServerProfile, PermissionLevel, ProbeErrorKind,
-    ProbeFailure, ProbeInputSource, RuntimeTool, ServerGate, ToolDossier,
+    ProbeFailure, ProbeInputSource, RuntimeTool, RuntimeValidationSpec, ServerGate, ToolDossier,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -74,8 +74,18 @@ pub fn contract_test_bundle(
         };
         let runtime_names = runtime_map.keys().cloned().collect::<BTreeSet<_>>();
 
+        let validation_specs = if dossier.runtime_validations.is_empty() {
+            dossier
+                .tool_dossiers
+                .iter()
+                .map(runtime_validation_from_legacy_tool)
+                .collect::<Vec<_>>()
+        } else {
+            dossier.runtime_validations.clone()
+        };
+
         let mut missing_runtime_tools = vec![];
-        let mut tools = Vec::with_capacity(dossier.tool_dossiers.len());
+        let mut tools = Vec::with_capacity(validation_specs.len());
         let mut server_passed = dossier.server_gate == ServerGate::Ready;
         if dossier.server_gate == ServerGate::Blocked {
             reasons.push(format!(
@@ -84,14 +94,19 @@ pub fn contract_test_bundle(
             ));
         }
 
-        for tool in &dossier.tool_dossiers {
-            let normalized = normalize_tool_name(&tool.name);
+        for validation in &validation_specs {
+            let normalized = normalize_tool_name(&validation.tool_name);
             if !runtime_names.contains(&normalized) {
                 missing_runtime_tools.push(normalized.clone());
             }
             let runtime_spec = runtime_map.get(&normalized);
-            let result =
-                evaluate_tool_contract(tool, &dossier.server, runtime_spec, &runtime_map, options);
+            let result = evaluate_tool_contract(
+                &validation_as_tool_dossier(validation),
+                &dossier.server,
+                runtime_spec,
+                &runtime_map,
+                options,
+            );
             if !result.passed {
                 server_passed = false;
             }
@@ -127,6 +142,28 @@ pub fn contract_test_bundle(
         passed: all_passed,
         servers,
     })
+}
+
+fn runtime_validation_from_legacy_tool(tool: &ToolDossier) -> RuntimeValidationSpec {
+    RuntimeValidationSpec {
+        tool_name: normalize_tool_name(&tool.name),
+        contract_tests: tool.contract_tests.clone(),
+        probe_inputs: tool.probe_inputs.clone(),
+        probe_input_source: tool.probe_input_source,
+    }
+}
+
+fn validation_as_tool_dossier(validation: &RuntimeValidationSpec) -> ToolDossier {
+    ToolDossier {
+        name: validation.tool_name.clone(),
+        explanation: String::new(),
+        recipe: vec![],
+        evidence: vec![],
+        confidence: 0.0,
+        contract_tests: validation.contract_tests.clone(),
+        probe_inputs: validation.probe_inputs.clone(),
+        probe_input_source: validation.probe_input_source,
+    }
 }
 
 fn evaluate_tool_contract(

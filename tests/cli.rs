@@ -112,12 +112,20 @@ fn test_mcpsmith_discover_build_contract_apply() {
         .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
 
     let updated = std::fs::read_to_string(&config_path).unwrap();
+    let orchestrator_body =
+        std::fs::read_to_string(ctx.orchestrator_skill_path("playwright")).unwrap();
+    let workflow_body =
+        std::fs::read_to_string(ctx.tool_skill_path("playwright", "execute")).unwrap();
     assert!(!updated.contains("playwright"));
     assert!(ctx.orchestrator_skill_path("playwright").exists());
     assert!(ctx.tool_skill_path("playwright", "execute").exists());
     assert!(ctx.manifest_path("playwright").exists());
     assert!(!skills_dir.join("playwright.md").exists());
     assert!(!skills_dir.join("playwright--execute.md").exists());
+    assert!(!orchestrator_body.contains("mcp__"));
+    assert!(!workflow_body.contains("mcp__"));
+    assert!(!workflow_body.contains("maps to"));
+    assert!(workflow_body.contains("## Native Steps"));
     assert!(report_path.exists());
     assert_eq!(count_backups(&config_path), 1);
 }
@@ -206,13 +214,9 @@ fn test_mcpsmith_build_rejects_blocked_dossier() {
           }
         }
       ],
-      "tool_dossiers": [
+      "runtime_validations": [
         {
-          "name": "execute",
-          "explanation": "Execute the action.",
-          "recipe": ["Run execute."],
-          "evidence": ["runtime metadata"],
-          "confidence": 0.5,
+          "tool_name": "execute",
           "contract_tests": [
             {
               "probe": "happy-path",
@@ -235,6 +239,40 @@ fn test_mcpsmith_build_rejects_blocked_dossier() {
           ],
           "probe_inputs": {},
           "probe_input_source": "synthesized"
+        }
+      ],
+      "workflow_skills": [
+        {
+          "id": "execute",
+          "title": "Execute workflow",
+          "goal": "Run the execute workflow without relying on the MCP server.",
+          "when_to_use": "Use this when you need to run the execute workflow with native commands.",
+          "trigger_phrases": ["run execute"],
+          "origin_tools": ["execute"],
+          "prerequisite_workflows": [],
+          "followup_workflows": [],
+          "required_context": [
+            {
+              "name": "query",
+              "guidance": "Collect the exact query before running the workflow.",
+              "required": true
+            }
+          ],
+          "context_acquisition": ["Ask for the missing query instead of guessing it."],
+          "branching_rules": ["If the query is missing, stop before running commands."],
+          "stop_and_ask": ["Stop if the query is ambiguous or could mutate state."],
+          "native_steps": [
+            {
+              "title": "Run execute",
+              "command": "printf '%s\\n' 'execute:$QUERY'",
+              "details": "Replace $QUERY with the exact query value."
+            }
+          ],
+          "verification": ["Confirm the command completed successfully."],
+          "return_contract": ["Return the command output and the exact query used."],
+          "guardrails": ["Do not invent query values."],
+          "evidence": ["runtime metadata"],
+          "confidence": 0.5
         }
       ],
       "server_gate": "blocked",
@@ -311,7 +349,7 @@ fn test_mcpsmith_discover_records_source_grounding_in_dossier() {
         "https://github.com/acme/local-mcp"
     );
 
-    let evidence = dossier["dossiers"][0]["tool_dossiers"][0]["evidence"]
+    let evidence = dossier["dossiers"][0]["workflow_skills"][0]["evidence"]
         .as_array()
         .unwrap()
         .iter()
@@ -346,9 +384,16 @@ fn test_mcpsmith_one_shot_works_with_claude_only() {
         .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
 
     let updated = std::fs::read_to_string(&config_path).unwrap();
+    let orchestrator_body =
+        std::fs::read_to_string(ctx.orchestrator_skill_path("playwright")).unwrap();
+    let workflow_body =
+        std::fs::read_to_string(ctx.tool_skill_path("playwright", "execute")).unwrap();
     assert!(!updated.contains("playwright"));
     assert!(ctx.orchestrator_skill_path("playwright").exists());
     assert!(ctx.manifest_path("playwright").exists());
+    assert!(!orchestrator_body.contains("mcp__"));
+    assert!(!workflow_body.contains("mcp__"));
+    assert!(workflow_body.contains("## Native Steps"));
 }
 
 #[test]

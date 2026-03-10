@@ -31,14 +31,29 @@ fn assert_live_fixture(path: &str, expected_tool: &str) {
 
     let dossier = &bundle.dossiers[0];
     assert_eq!(
-        dossier.tool_dossiers.len(),
+        dossier.runtime_validations.len(),
         1,
-        "{path} should contain one tool"
+        "{path} should contain one runtime validation"
     );
-    assert_eq!(dossier.tool_dossiers[0].name, expected_tool);
     assert!(
-        dossier.tool_dossiers[0].probe_inputs.happy_path.is_some(),
+        dossier.runtime_validations[0]
+            .probe_inputs
+            .happy_path
+            .is_some(),
         "{path} is missing explicit happy-path probe input"
+    );
+    assert_eq!(dossier.runtime_validations[0].tool_name, expected_tool);
+    assert_eq!(
+        dossier.workflow_skills.len(),
+        1,
+        "{path} should contain one workflow"
+    );
+    assert!(
+        dossier.workflow_skills[0]
+            .origin_tools
+            .iter()
+            .any(|tool| tool == expected_tool),
+        "{path} should wire the expected runtime tool into the workflow"
     );
     assert!(
         Path::new(&dossier.server.source_path).ends_with("dummy-config.json"),
@@ -58,6 +73,6 @@ fn live_smoke_fixtures_deserialize_with_explicit_happy_path_inputs() {
     );
     assert_live_fixture(
         "tests/fixtures/live/xcodebuildmcp-smoke.dossier.json",
-        "session_show_defaults",
+        "screenshot",
     );
 }

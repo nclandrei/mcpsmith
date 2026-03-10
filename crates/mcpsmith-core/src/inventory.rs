@@ -41,7 +41,7 @@ pub fn plan(
 
     let mut actions = vec![
         "Capture the current MCP server config and create a rollback backup.".to_string(),
-        "Generate one orchestrator skill and a capability skill set mapped to tool behaviors."
+        "Generate one orchestrator skill and a standalone workflow skill pack that replaces the server."
             .to_string(),
     ];
     let mut warnings = vec![];
@@ -50,7 +50,7 @@ pub fn plan(
     match effective_mode {
         PlanMode::Hybrid => {
             actions.push(
-                "Keep MCP enabled and use the generated skill set as the default orchestration layer."
+                "Keep MCP enabled and use the generated workflow skill pack as the default orchestration layer."
                     .to_string(),
             );
             actions.push(
@@ -60,7 +60,7 @@ pub fn plan(
         }
         PlanMode::Replace => {
             actions.push(
-                "Generate replacement skill set and parity checks for tool-level behaviors."
+                "Generate replacement workflow skills and parity checks for runtime behavior coverage."
                     .to_string(),
             );
             actions.push(

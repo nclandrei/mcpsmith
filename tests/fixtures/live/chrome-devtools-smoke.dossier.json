@@ -1,10 +1,10 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "generated_at": "2026-03-09T00:00:00Z",
   "dossiers": [
     {
       "generated_at": "2026-03-09T00:00:00Z",
-      "format_version": 5,
+      "format_version": 6,
       "server": {
         "id": "custom-1:chrome-devtools",
         "name": "chrome-devtools",
@@ -33,25 +33,16 @@
       "runtime_tools": [
         {
           "name": "list_pages",
-          "description": "Get a list of pages  open in the browser.",
+          "description": "Get a list of pages open in the browser.",
           "input_schema": {
             "type": "object",
             "properties": {}
           }
         }
       ],
-      "tool_dossiers": [
+      "runtime_validations": [
         {
-          "name": "list_pages",
-          "explanation": "List the currently open browser pages without mutating browser state.",
-          "recipe": [
-            "Run the tool with an empty object.",
-            "Inspect the returned page list."
-          ],
-          "evidence": [
-            "live smoke fixture"
-          ],
-          "confidence": 0.9,
+          "tool_name": "list_pages",
           "contract_tests": [
             {
               "probe": "happy-path",
@@ -76,6 +67,44 @@
             "happy_path": {}
           },
           "probe_input_source": "backend"
+        }
+      ],
+      "workflow_skills": [
+        {
+          "id": "inspect-open-browser-pages",
+          "title": "Inspect open browser pages",
+          "goal": "List the currently open browser pages without relying on the MCP server.",
+          "when_to_use": "Use this when you need to inspect the current browser session tabs.",
+          "trigger_phrases": [
+            "list open tabs",
+            "inspect browser pages"
+          ],
+          "origin_tools": [
+            "list_pages"
+          ],
+          "stop_and_ask": [
+            "Stop if no local browser session or debugging target is available."
+          ],
+          "native_steps": [
+            {
+              "title": "Inspect the local browser session",
+              "command": "python3 - <<'PY'\nprint('inspect local browser pages here')\nPY",
+              "details": "Replace the placeholder with the concrete local browser inspection command for the target environment."
+            }
+          ],
+          "verification": [
+            "Confirm the command completed successfully and returned the current page list."
+          ],
+          "return_contract": [
+            "Return the list of open pages or the captured browser-session artifact."
+          ],
+          "guardrails": [
+            "Do not mutate the local browser session while inspecting it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
         }
       ],
       "server_gate": "ready",

@@ -1,10 +1,10 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "generated_at": "2026-03-09T00:00:00Z",
   "dossiers": [
     {
       "generated_at": "2026-03-09T00:00:00Z",
-      "format_version": 5,
+      "format_version": 6,
       "server": {
         "id": "custom-1:xcodebuildmcp",
         "name": "xcodebuildmcp",
@@ -33,50 +33,98 @@
       },
       "runtime_tools": [
         {
-          "name": "session_show_defaults",
-          "description": "Show current active defaults. Required before your first build/run/test call in a session — do not assume defaults are configured.",
+          "name": "screenshot",
+          "description": "Capture a simulator screenshot.",
           "input_schema": {
             "type": "object",
-            "properties": {}
+            "properties": {
+              "returnFormat": {
+                "type": "string"
+              }
+            }
           }
         }
       ],
-      "tool_dossiers": [
+      "runtime_validations": [
         {
-          "name": "session_show_defaults",
-          "explanation": "Read the current XcodeBuildMCP session defaults without mutating simulator or project state.",
-          "recipe": [
-            "Run the tool with an empty object.",
-            "Inspect the returned defaults payload."
-          ],
-          "evidence": [
-            "live smoke fixture"
-          ],
-          "confidence": 0.9,
+          "tool_name": "screenshot",
           "contract_tests": [
             {
               "probe": "happy-path",
-              "expected": "Returns the current session defaults.",
-              "method": "Run with an empty object.",
+              "expected": "Returns a screenshot artifact path.",
+              "method": "Run with returnFormat set to path.",
               "applicable": true
             },
             {
               "probe": "invalid-input",
               "expected": "Rejects malformed input.",
-              "method": "Run with a non-object payload.",
+              "method": "Run with an invalid returnFormat payload.",
               "applicable": true
             },
             {
               "probe": "side-effect-safety",
-              "expected": "Read-only smoke fixture.",
-              "method": "Skip for read-only smoke fixture.",
+              "expected": "Screenshot capture is allowed for the smoke fixture.",
+              "method": "Skip destructive probing because the workflow only captures evidence.",
               "applicable": false
             }
           ],
           "probe_inputs": {
-            "happy_path": {}
+            "happy_path": {
+              "returnFormat": "path"
+            }
           },
           "probe_input_source": "backend"
+        }
+      ],
+      "workflow_skills": [
+        {
+          "id": "capture-ios-simulator-screenshot",
+          "title": "Capture iOS simulator screenshot",
+          "goal": "Capture the current iOS simulator screen with native Xcode tools.",
+          "when_to_use": "Use this when you need a PNG screenshot from the active iOS simulator.",
+          "trigger_phrases": [
+            "take simulator screenshot",
+            "capture ios screenshot"
+          ],
+          "origin_tools": [
+            "screenshot"
+          ],
+          "required_context": [
+            {
+              "name": "output_path",
+              "guidance": "Choose the output PNG path before running the command.",
+              "required": true
+            }
+          ],
+          "context_acquisition": [
+            "Ask for the output path if the workflow has not already established one."
+          ],
+          "branching_rules": [
+            "If no simulator is booted yet, boot the target simulator before running the screenshot command."
+          ],
+          "stop_and_ask": [
+            "Stop if no simulator is booted or the target screen is unknown."
+          ],
+          "native_steps": [
+            {
+              "title": "Capture the active simulator screen",
+              "command": "OUTPUT_PATH=\"${TMPDIR:-/tmp}/mcpsmith-simulator.png\"\nxcrun simctl io booted screenshot \"$OUTPUT_PATH\"",
+              "details": "Replace the sample OUTPUT_PATH if the user asked for a specific artifact location, and make sure the intended screen is visible before running the command."
+            }
+          ],
+          "verification": [
+            "Confirm the PNG file exists at the chosen output path."
+          ],
+          "return_contract": [
+            "Return the screenshot path and a short note describing what screen was captured."
+          ],
+          "guardrails": [
+            "Do not overwrite an unrelated screenshot path without confirming it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
         }
       ],
       "server_gate": "ready",

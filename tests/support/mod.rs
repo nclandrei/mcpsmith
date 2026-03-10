@@ -134,7 +134,7 @@ pub fn write_mock_codex_script(path: &Path) {
 }
 
 pub fn write_mock_codex_script_for(path: &Path, tools: &[&str]) {
-    let payload = render_tool_dossier_payload(tools, 0.9);
+    let payload = render_workflow_payload(tools, 0.9);
     let body = format!(
         r#"#!/bin/sh
 if [ "$1" = "--version" ] || [ "$1" = "-v" ] || [ "$1" = "version" ]; then
@@ -168,7 +168,7 @@ pub fn write_mock_claude_script(path: &Path) {
 }
 
 pub fn write_mock_claude_script_for(path: &Path, tools: &[&str]) {
-    let payload = render_tool_dossier_payload(tools, 0.85);
+    let payload = render_workflow_payload(tools, 0.85);
     let body = format!(
         r#"#!/bin/sh
 if [ "$1" = "--version" ] || [ "$1" = "-v" ] || [ "$1" = "version" ]; then
@@ -265,18 +265,18 @@ fn write_server_config(
     .unwrap();
 }
 
-fn render_tool_dossier_payload(tools: &[&str], confidence: f64) -> String {
-    let dossiers = tools
+fn render_workflow_payload(tools: &[&str], confidence: f64) -> String {
+    let workflows = tools
         .iter()
         .map(|name| {
             format!(
-                r#"{{"name":"{name}","explanation":"Run {name}","recipe":["validate input","execute {name}","verify output"],"evidence":["runtime metadata"],"confidence":{confidence},"contract_tests":[{{"probe":"happy-path","expected":"valid output","method":"run valid request","applicable":true}},{{"probe":"invalid-input","expected":"returns validation error","method":"run malformed request","applicable":true}},{{"probe":"side-effect-safety","expected":"requires confirmation for mutations","method":"run check/dry-run first","applicable":true}}]}}"#
+                r#"{{"id":"{name}","title":"{name} workflow","goal":"Perform {name} operations without relying on the MCP server.","when_to_use":"Use this when you need to run the {name} workflow with native commands.","trigger_phrases":["run {name}","use {name}"],"origin_tools":["{name}"],"prerequisite_workflows":[],"followup_workflows":[],"required_context":[{{"name":"query","guidance":"Collect the exact query or target before running the workflow.","required":true}}],"context_acquisition":["If the query is missing, ask the user for it instead of guessing."],"branching_rules":["If the target context is not ready, stop and gather it before running native commands."],"stop_and_ask":["Stop if the workflow would mutate state unexpectedly or the query is ambiguous."],"native_steps":[{{"title":"Run the native command","command":"printf '%s\\n' '{name}:$QUERY'","details":"Replace $QUERY with the exact collected query value."}}],"verification":["Confirm the native command completed successfully and returned output."],"return_contract":["Return the command output together with the exact query that was used."],"guardrails":["Do not invent query values or hidden defaults."],"evidence":["runtime metadata"],"confidence":{confidence}}}"#
             )
         })
         .collect::<Vec<_>>()
         .join(",");
 
-    format!(r#"{{"tool_dossiers":[{dossiers}]}}"#)
+    format!(r#"{{"workflow_skills":[{workflows}]}}"#)
 }
 
 fn write_agent_script(path: &Path, body: &str) {
