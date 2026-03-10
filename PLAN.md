@@ -22,11 +22,9 @@ Current working behavior already includes:
 - atomic apply
 - output targeting `~/.agents/skills/`
 
-What is still missing is standalone productization:
-- better modular boundaries
-- real source-grounded dossiers
-- real installed-skill output format
-- reusable live MCP test harness
+What is still missing is the remaining standalone productization work:
+- reusable shared test support and final live MCP matrix cleanup
+- full standalone docs and examples
 - CI/release readiness
 
 All work below must happen in `mcpsmith`.
@@ -40,9 +38,9 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | MS-00 | completed | `mcpsmith` | done | none | repo bootstrap files and agent instructions |
 | MS-01 | completed | `mcpsmith` | done | none | standalone public CLI/config surface freeze |
 | MS-02 | completed | `mcpsmith` | done | MS-01 | internal module decomposition |
-| MS-03 | in progress | `mcpsmith` | after MS-02 starts | MS-01, MS-02 | source-grounded dossier pipeline |
+| MS-03 | completed | `mcpsmith` | done | MS-01, MS-02 | source-grounded dossier pipeline |
 | MS-04 | completed | `mcpsmith` | done | MS-01, MS-02 | real installed skill-pack output |
-| MS-05 | pending | `mcpsmith` | now for scaffold | MS-01 for final shape | reusable test harness and live MCP matrix |
+| MS-05 | in progress | `mcpsmith` | now | MS-01 for final shape | reusable test harness and live MCP matrix |
 | MS-06 | pending | `mcpsmith` | after MS-01 | MS-00, MS-01 | docs, examples, AGENTS, llms |
 | MS-07 | pending | `mcpsmith` | after MS-00 | MS-00, MS-05, MS-06 | CI and release readiness |
 
@@ -216,7 +214,7 @@ Completed on 2026-03-08 with:
 - new public-API smoke coverage added in `crates/mcpsmith-core/tests/module_smoke.rs`
 - repo local checks tightened to `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` so subcrate tests are verified by default
 
-### MS-03 [in progress] Source-Grounded Dossier Pipeline
+### MS-03 [completed] Source-Grounded Dossier Pipeline
 Add real source grounding before or during dossier generation:
 - resolve executable/package source from MCP config
 - support:
@@ -238,19 +236,23 @@ When source is not reachable:
 - fallback to runtime metadata + runtime contract tests only
 - mark evidence level clearly
 
-Progress:
+Completed on 2026-03-10 with:
 - discovery now records structured `source_grounding` for:
   - local executable/path entrypoints
   - `npx`/npm package specs
   - `uvx`/PyPI package specs
   - explicit homepage/repository metadata when present
 - local source inspection now reads nearby `package.json` / `pyproject.toml` metadata when available
+- remote source inspection now enriches npm package metadata from registry responses when local manifests are unavailable
+- remote source inspection now enriches PyPI package metadata from package JSON responses when local manifests are unavailable
+- explicit GitHub repository URLs now support remote manifest inspection for `package.json` / `pyproject.toml` source metadata
 - dossier generation now injects source grounding into backend prompts and merges source-derived evidence into each tool dossier
-- tests now cover source resolvers, prompt grounding, evidence merge, and discover JSON output
+- `source_grounding` now records inspected URLs in addition to inspected local paths so dossier evidence can cite remote source origins
+- tests now cover source resolvers, prompt grounding, evidence merge, discover JSON output, and deterministic remote npm/PyPI/repository inspection
 
 Remaining:
-- broader remote package/repository inspection beyond config and locally reachable manifests
-- any follow-on refactor needed once MS-04 or later work expands source inspection breadth
+- broader remote package/repository inspection beyond registry metadata and GitHub-style repository manifests
+- any follow-on refactor needed if later work expands source inspection breadth or provider coverage
 
 Done when:
 - dossier quality is driven by runtime truth plus source grounding where possible
@@ -292,7 +294,7 @@ Completed on 2026-03-08 with:
 - atomic apply rollback coverage added so failed MCP config mutation removes the installed skill directories again
 - CLI coverage updated in `tests/cli.rs` and module smoke coverage updated in `crates/mcpsmith-core/tests/module_smoke.rs`
 
-### MS-05 [pending] Test Harness And Live MCP Matrix
+### MS-05 [in progress] Test Harness And Live MCP Matrix
 Extract reusable mock MCP helpers into shared test support.
 
 Add reusable smoke scripts for:
@@ -316,6 +318,22 @@ Add one `cli-verify` smoke workflow that proves:
 - help output
 - a stepwise success path
 - a one-shot success path
+
+Progress:
+- shared smoke helpers now live in `scripts/smoke/common.sh`
+- reusable smoke scripts now exist for:
+  - mock MCP fixture flow
+  - live public MCP flow
+  - `cli-verify` visual verification
+- live dossier fixtures now exist for:
+  - `memory=@modelcontextprotocol/server-memory`
+  - `chrome-devtools=chrome-devtools-mcp@latest`
+  - optional `xcodebuildmcp@latest`
+- smoke asset coverage now checks fixture hydration and expected probe inputs
+
+Remaining:
+- extract duplicated mock MCP/backend helpers from `tests/cli.rs` into reusable Rust-side test support
+- run and preserve the live matrix evidence as part of a repeatable workflow, not just checked-in scripts/fixtures
 
 Done when:
 - another agent can run deterministic mocks and at least two live MCP packages
@@ -364,6 +382,9 @@ Complete package metadata in `Cargo.toml`:
 - repository
 - license
 - optional keywords/categories
+
+Progress:
+- package metadata in `Cargo.toml` is now populated with description, repository, homepage, license, keywords, and categories
 
 Add release checklist:
 - version bump
