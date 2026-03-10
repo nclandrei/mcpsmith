@@ -162,6 +162,105 @@ fn test_mcpsmith_apply_rolls_back_installed_skill_dirs_when_config_entry_is_miss
 }
 
 #[test]
+fn test_mcpsmith_build_rejects_blocked_dossier() {
+    let ctx = TestContext::new();
+    let dossier_path = ctx.dossier_path();
+    let skills_dir = ctx.skills_dir();
+    std::fs::write(
+        &dossier_path,
+        r#"{
+  "format_version": 5,
+  "generated_at": "2026-03-10T00:00:00Z",
+  "dossiers": [
+    {
+      "generated_at": "2026-03-10T00:00:00Z",
+      "format_version": 5,
+      "server": {
+        "id": "fixture:playwright",
+        "name": "playwright",
+        "source_label": "fixture",
+        "source_path": "/tmp/mcp.json",
+        "purpose": "Read-only browser helpers",
+        "command": "npx",
+        "args": ["-y", "@acme/playwright-mcp"],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": ["read-only"],
+        "inferred_permission": "read-only",
+        "recommendation": "replace-candidate",
+        "recommendation_reason": "read-only",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false
+        }
+      },
+      "runtime_tools": [
+        {
+          "name": "execute",
+          "description": "Execute action",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tool_dossiers": [
+        {
+          "name": "execute",
+          "explanation": "Execute the action.",
+          "recipe": ["Run execute."],
+          "evidence": ["runtime metadata"],
+          "confidence": 0.5,
+          "contract_tests": [
+            {
+              "probe": "happy-path",
+              "expected": "Returns success.",
+              "method": "Run with valid input.",
+              "applicable": true
+            },
+            {
+              "probe": "invalid-input",
+              "expected": "Returns validation error.",
+              "method": "Run with invalid input.",
+              "applicable": true
+            },
+            {
+              "probe": "side-effect-safety",
+              "expected": "Skips destructive path.",
+              "method": "Do not execute side effects.",
+              "applicable": false
+            }
+          ],
+          "probe_inputs": {},
+          "probe_input_source": "synthesized"
+        }
+      ],
+      "server_gate": "blocked",
+      "gate_reasons": ["Backend dossier generation failed; fallback-only draft output."],
+      "backend_used": "codex",
+      "backend_fallback_used": false,
+      "backend_diagnostics": []
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    ctx.cmd()
+        .args(["build", "--from-dossier"])
+        .arg(&dossier_path)
+        .args(["--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Cannot build standalone skills from blocked dossier",
+        ));
+}
+
+#[test]
 fn test_mcpsmith_discover_records_source_grounding_in_dossier() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();

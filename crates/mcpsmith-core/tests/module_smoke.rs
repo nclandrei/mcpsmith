@@ -141,6 +141,22 @@ fn dossier_roundtrip_builds_skills_after_module_split() {
 }
 
 #[test]
+fn build_rejects_blocked_dossier_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills_dir = dir.path().join("skills");
+    let mut bundle = sample_bundle(dir.path());
+    bundle.dossiers[0].server_gate = ServerGate::Blocked;
+    bundle.dossiers[0].gate_reasons =
+        vec!["Backend dossier generation failed; fallback-only draft output.".to_string()];
+
+    let err = build_from_bundle(&bundle, Some(skills_dir)).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Cannot build standalone skills from blocked dossier")
+    );
+}
+
+#[test]
 fn inventory_and_plan_still_resolve_servers_after_module_split() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("mcp.json");

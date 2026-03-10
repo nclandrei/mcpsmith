@@ -3,7 +3,7 @@ use crate::{
     MCPServerProfile, ManifestToolSkill, ServerDossier, ServerGate, SkillParityManifest,
     ToolDossier, ToolSkillHint,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::collections::BTreeSet;
 use std::fs;
@@ -13,16 +13,28 @@ pub fn build_from_bundle(
     bundle: &DossierBundle,
     skills_dir: Option<PathBuf>,
 ) -> Result<BuildResult> {
+    for dossier in &bundle.dossiers {
+        if dossier.server_gate == ServerGate::Blocked {
+            let reasons = if dossier.gate_reasons.is_empty() {
+                "no gate reason recorded".to_string()
+            } else {
+                dossier.gate_reasons.join(" | ")
+            };
+            bail!(
+                "Cannot build standalone skills from blocked dossier '{}': {}",
+                dossier.server.id,
+                reasons
+            );
+        }
+    }
+
     let skills_root = skills_dir.unwrap_or_else(default_agents_skills_dir);
     fs::create_dir_all(&skills_root)
         .with_context(|| format!("Failed to create skills dir {}", skills_root.display()))?;
 
     let mut servers = Vec::with_capacity(bundle.dossiers.len());
     for dossier in &bundle.dossiers {
-        let (orchestrator, tool_paths, mut notes) = write_server_skills(dossier, &skills_root)?;
-        if dossier.server_gate == ServerGate::Blocked {
-            notes.push("Server gate is blocked; generated skills are draft-only until discover/contract-test gates pass.".to_string());
-        }
+        let (orchestrator, tool_paths, notes) = write_server_skills(dossier, &skills_root)?;
         servers.push(BuildServerResult {
             server_id: dossier.server.id.clone(),
             orchestrator_skill_path: orchestrator,
