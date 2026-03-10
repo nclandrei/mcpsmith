@@ -372,6 +372,10 @@ pub(crate) fn source_ground_evidence(
         evidence.push(format!("source-inspected-path: {}", path.display()));
     }
 
+    for url in &server.source_grounding.inspected_urls {
+        evidence.push(format!("source-inspected-url: {url}"));
+    }
+
     if server.source_grounding.evidence_level == SourceEvidenceLevel::RuntimeOnly {
         evidence.push("runtime metadata + contract test fallback".to_string());
     }
@@ -507,6 +511,7 @@ mod tests {
                 homepage: Some("https://playwright.dev".to_string()),
                 repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
                 inspected_paths: vec![],
+                inspected_urls: vec![],
             },
         };
         let tool = RuntimeTool {
@@ -560,6 +565,7 @@ mod tests {
                 homepage: None,
                 repository_url: None,
                 inspected_paths: vec![],
+                inspected_urls: vec![],
             },
         };
         let tool = RuntimeTool {

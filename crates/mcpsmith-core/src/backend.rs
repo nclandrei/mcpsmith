@@ -970,6 +970,7 @@ mod tests {
                 homepage: Some("https://playwright.dev".to_string()),
                 repository_url: Some("https://github.com/microsoft/playwright-mcp".to_string()),
                 inspected_paths: vec![],
+                inspected_urls: vec![],
             },
         };
         let tools = vec![RuntimeTool {

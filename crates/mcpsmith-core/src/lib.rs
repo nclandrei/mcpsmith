@@ -164,6 +164,8 @@ pub struct SourceGrounding {
     pub repository_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inspected_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspected_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -3,10 +3,12 @@ use crate::{
     SourceEvidenceLevel, SourceGrounding, SourceKind,
 };
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use chrono::Utc;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertInventory> {
     let mut servers = Vec::new();
@@ -310,6 +312,8 @@ fn resolve_source_grounding(
             grounding.package_name = Some(package_name.clone());
             grounding.package_version = package_version;
             inspect_local_node_package(source_path, &package_name, &mut grounding);
+            inspect_remote_npm_package(&package_name, &mut grounding);
+            inspect_remote_repository_manifest(&mut grounding);
             return finalize_source_grounding(grounding);
         }
 
@@ -318,6 +322,8 @@ fn resolve_source_grounding(
             grounding.package_name = Some(package_name);
             grounding.package_version = package_version;
             inspect_local_pyproject(source_path, &mut grounding);
+            inspect_remote_pypi_package(&mut grounding);
+            inspect_remote_repository_manifest(&mut grounding);
             return finalize_source_grounding(grounding);
         }
     }
@@ -330,6 +336,7 @@ fn resolve_source_grounding(
         SourceKind::Unknown
     };
 
+    inspect_remote_repository_manifest(&mut grounding);
     finalize_source_grounding(grounding)
 }
 
@@ -451,15 +458,37 @@ fn merge_package_json_metadata(grounding: &mut SourceGrounding, path: &Path) {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return;
     };
-    let Ok(root) = serde_json::from_str::<Value>(&raw) else {
+    merge_package_json_text(grounding, &raw, Some(path), None);
+}
+
+fn merge_pyproject_metadata(grounding: &mut SourceGrounding, path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    merge_pyproject_text(grounding, &raw, Some(path), None);
+}
+
+fn merge_package_json_text(
+    grounding: &mut SourceGrounding,
+    raw: &str,
+    source_path: Option<&Path>,
+    source_url: Option<&str>,
+) {
+    let Ok(root) = serde_json::from_str::<Value>(raw) else {
         return;
     };
     let Some(obj) = root.as_object() else {
         return;
     };
 
-    grounding.inspected = true;
-    grounding.inspected_paths.push(path.to_path_buf());
+    record_source_inspection(grounding, source_path, source_url);
+    merge_package_json_object(grounding, obj);
+}
+
+fn merge_package_json_object(
+    grounding: &mut SourceGrounding,
+    obj: &serde_json::Map<String, Value>,
+) {
     if grounding.package_name.is_none() {
         grounding.package_name = json_string(obj.get("name"));
     }
@@ -477,17 +506,21 @@ fn merge_package_json_metadata(grounding: &mut SourceGrounding, path: &Path) {
     }
 }
 
-fn merge_pyproject_metadata(grounding: &mut SourceGrounding, path: &Path) {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(root) = toml::from_str::<toml::Value>(&raw) else {
+fn merge_pyproject_text(
+    grounding: &mut SourceGrounding,
+    raw: &str,
+    source_path: Option<&Path>,
+    source_url: Option<&str>,
+) {
+    let Ok(root) = toml::from_str::<toml::Value>(raw) else {
         return;
     };
 
-    grounding.inspected = true;
-    grounding.inspected_paths.push(path.to_path_buf());
+    record_source_inspection(grounding, source_path, source_url);
+    merge_pyproject_value(grounding, &root);
+}
 
+fn merge_pyproject_value(grounding: &mut SourceGrounding, root: &toml::Value) {
     if let Some(project) = root.get("project").and_then(toml::Value::as_table) {
         if grounding.package_name.is_none() {
             grounding.package_name = toml_string(project.get("name"));
@@ -528,12 +561,295 @@ fn merge_pyproject_metadata(grounding: &mut SourceGrounding, path: &Path) {
     }
 }
 
+fn record_source_inspection(
+    grounding: &mut SourceGrounding,
+    source_path: Option<&Path>,
+    source_url: Option<&str>,
+) {
+    grounding.inspected = true;
+    if let Some(path) = source_path {
+        grounding.inspected_paths.push(path.to_path_buf());
+    }
+    if let Some(url) = source_url {
+        grounding.inspected_urls.push(url.to_string());
+    }
+}
+
 fn toml_string(value: Option<&toml::Value>) -> Option<String> {
     value
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn inspect_remote_npm_package(package_name: &str, grounding: &mut SourceGrounding) {
+    if !remote_source_fetch_enabled() || grounding.inspected {
+        return;
+    }
+
+    let base = npm_registry_base_url();
+    let encoded_name = url_encode_path_segment(package_name);
+    let endpoint = if let Some(version) = grounding.package_version.as_deref() {
+        format!(
+            "{}/{}/{}",
+            base.trim_end_matches('/'),
+            encoded_name,
+            url_encode_path_segment(version)
+        )
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), encoded_name)
+    };
+
+    let Some(root) = fetch_remote_json(&endpoint, Some("application/json")) else {
+        return;
+    };
+
+    let manifest = if grounding.package_version.is_some() {
+        root
+    } else {
+        select_npm_manifest(&root, grounding)
+    };
+
+    let Some(obj) = manifest.as_object() else {
+        return;
+    };
+
+    record_source_inspection(grounding, None, Some(&endpoint));
+    merge_package_json_object(grounding, obj);
+}
+
+fn select_npm_manifest(root: &Value, grounding: &mut SourceGrounding) -> Value {
+    let latest = root
+        .get("dist-tags")
+        .and_then(Value::as_object)
+        .and_then(|tags| tags.get("latest"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    if grounding.package_version.is_none() {
+        grounding.package_version = latest.clone();
+    }
+
+    latest
+        .as_deref()
+        .and_then(|version| {
+            root.get("versions")
+                .and_then(Value::as_object)
+                .and_then(|versions| versions.get(version))
+        })
+        .cloned()
+        .unwrap_or_else(|| root.clone())
+}
+
+fn inspect_remote_pypi_package(grounding: &mut SourceGrounding) {
+    if !remote_source_fetch_enabled() || grounding.inspected {
+        return;
+    }
+
+    let Some(package_name) = grounding.package_name.as_deref() else {
+        return;
+    };
+    let base = pypi_base_url();
+    let endpoint = if let Some(version) = grounding.package_version.as_deref() {
+        format!(
+            "{}/pypi/{}/{}/json",
+            base.trim_end_matches('/'),
+            url_encode_path_segment(package_name),
+            url_encode_path_segment(version)
+        )
+    } else {
+        format!(
+            "{}/pypi/{}/json",
+            base.trim_end_matches('/'),
+            url_encode_path_segment(package_name)
+        )
+    };
+
+    let Some(root) = fetch_remote_json(&endpoint, Some("application/json")) else {
+        return;
+    };
+    let Some(info) = root.get("info").and_then(Value::as_object) else {
+        return;
+    };
+
+    record_source_inspection(grounding, None, Some(&endpoint));
+    merge_pypi_info_object(grounding, info);
+}
+
+fn merge_pypi_info_object(grounding: &mut SourceGrounding, info: &serde_json::Map<String, Value>) {
+    if grounding.package_name.is_none() {
+        grounding.package_name = json_string(info.get("name"));
+    }
+    if grounding.package_version.is_none() {
+        grounding.package_version = json_string(info.get("version"));
+    }
+    if grounding.homepage.is_none() {
+        grounding.homepage =
+            project_urls_value(info.get("project_urls"), &["Homepage", "homepage"])
+                .or_else(|| json_string(info.get("home_page")));
+    }
+    if grounding.repository_url.is_none() {
+        grounding.repository_url = project_urls_value(
+            info.get("project_urls"),
+            &[
+                "Repository",
+                "repository",
+                "Source",
+                "source",
+                "Code",
+                "code",
+            ],
+        )
+        .or_else(|| json_string(info.get("project_url")));
+    }
+}
+
+fn project_urls_value(value: Option<&Value>, keys: &[&str]) -> Option<String> {
+    let urls = value?.as_object()?;
+    keys.iter()
+        .find_map(|key| urls.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn inspect_remote_repository_manifest(grounding: &mut SourceGrounding) {
+    if !remote_source_fetch_enabled() {
+        return;
+    }
+    if !needs_repository_manifest_inspection(grounding) {
+        return;
+    }
+
+    let Some(repository_url) = grounding.repository_url.as_deref() else {
+        return;
+    };
+    let Some((owner, repo)) = parse_github_repo(repository_url) else {
+        return;
+    };
+    let base = github_api_base_url();
+
+    for manifest in ["package.json", "pyproject.toml"] {
+        let endpoint = format!(
+            "{}/repos/{owner}/{repo}/contents/{manifest}",
+            base.trim_end_matches('/')
+        );
+        let Some(raw) = fetch_github_contents(&endpoint) else {
+            continue;
+        };
+        match manifest {
+            "package.json" => {
+                merge_package_json_text(grounding, &raw, None, Some(&endpoint));
+            }
+            "pyproject.toml" => {
+                merge_pyproject_text(grounding, &raw, None, Some(&endpoint));
+            }
+            _ => {}
+        }
+        if grounding.inspected_urls.iter().any(|url| url == &endpoint) {
+            break;
+        }
+    }
+}
+
+fn needs_repository_manifest_inspection(grounding: &SourceGrounding) -> bool {
+    grounding.repository_url.is_some()
+        && (grounding.package_name.is_none()
+            || grounding.package_version.is_none()
+            || grounding.homepage.is_none())
+}
+
+fn parse_github_repo(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_prefix("git+").unwrap_or(trimmed);
+    let path = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| trimmed.strip_prefix("git@github.com:"))?;
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    Some((owner.to_string(), repo.trim_end_matches(".git").to_string()))
+}
+
+fn npm_registry_base_url() -> String {
+    std::env::var("MCPSMITH_NPM_REGISTRY_BASE_URL")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string())
+}
+
+fn pypi_base_url() -> String {
+    std::env::var("MCPSMITH_PYPI_BASE_URL").unwrap_or_else(|_| "https://pypi.org".to_string())
+}
+
+fn github_api_base_url() -> String {
+    std::env::var("MCPSMITH_GITHUB_API_BASE_URL")
+        .unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
+fn remote_source_fetch_enabled() -> bool {
+    match std::env::var("MCPSMITH_SOURCE_FETCH") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+        Err(_) => !cfg!(test),
+    }
+}
+
+fn remote_source_fetch_timeout() -> Duration {
+    let seconds = std::env::var("MCPSMITH_SOURCE_FETCH_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3);
+    Duration::from_secs(seconds)
+}
+
+fn fetch_remote_json(url: &str, accept: Option<&str>) -> Option<Value> {
+    let body = fetch_remote_text(url, accept)?;
+    serde_json::from_str(&body).ok()
+}
+
+fn fetch_remote_text(url: &str, accept: Option<&str>) -> Option<String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(remote_source_fetch_timeout())
+        .build();
+    let mut request = agent.get(url).set("User-Agent", "mcpsmith");
+    if let Some(accept) = accept {
+        request = request.set("Accept", accept);
+    }
+    match request.call() {
+        Ok(response) => response.into_string().ok(),
+        Err(_) => None,
+    }
+}
+
+fn fetch_github_contents(url: &str) -> Option<String> {
+    let root = fetch_remote_json(url, Some("application/vnd.github+json"))?;
+    let encoded = root.get("content")?.as_str()?;
+    let normalized = encoded.lines().collect::<String>();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(normalized)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn url_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    encoded
 }
 
 fn resolve_npm_package_spec(command: &str, args: &[String]) -> Option<(String, Option<String>)> {
@@ -650,6 +966,8 @@ fn command_basename(command: &str) -> &str {
 fn finalize_source_grounding(mut grounding: SourceGrounding) -> SourceGrounding {
     grounding.inspected_paths.sort();
     grounding.inspected_paths.dedup();
+    grounding.inspected_urls.sort();
+    grounding.inspected_urls.dedup();
 
     grounding.evidence_level = if grounding.inspected {
         SourceEvidenceLevel::SourceInspected
@@ -904,9 +1222,74 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
+
+    fn source_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<str>) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value.as_ref());
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn spawn_http_server(routes: Vec<(&'static str, &'static str, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for (expected_path, status, body) in routes {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let first_line = request.lines().next().unwrap_or_default();
+                assert!(
+                    first_line.contains(expected_path),
+                    "expected request path {expected_path}, got {first_line}"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+
+        format!("http://{}", addr)
+    }
 
     #[test]
     fn discover_resolves_npx_package_source_grounding() {
+        let _guard = source_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("settings.json");
         std::fs::write(
@@ -947,6 +1330,7 @@ mod tests {
 
     #[test]
     fn discover_resolves_uvx_package_source_grounding() {
+        let _guard = source_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("settings.json");
         std::fs::write(
@@ -982,6 +1366,7 @@ mod tests {
 
     #[test]
     fn discover_inspects_local_executable_source_manifest() {
+        let _guard = source_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let tool_root = dir.path().join("local-tool");
         let bin_dir = tool_root.join("bin");
@@ -1034,6 +1419,171 @@ mod tests {
         assert_eq!(
             server.source_grounding.package_name.as_deref(),
             Some("@acme/local-mcp")
+        );
+    }
+
+    #[test]
+    fn discover_enriches_npm_package_from_remote_registry() {
+        let _guard = source_env_lock().lock().unwrap();
+        let server = spawn_http_server(vec![(
+            "/%40playwright%2Fmcp",
+            "200 OK",
+            r#"{"dist-tags":{"latest":"1.55.0"},"versions":{"1.55.0":{"name":"@playwright/mcp","version":"1.55.0","homepage":"https://playwright.dev","repository":{"url":"https://github.com/microsoft/playwright-mcp"}}}}"#,
+        )]);
+        let _fetch = EnvVarGuard::set("MCPSMITH_SOURCE_FETCH", "1");
+        let _registry = EnvVarGuard::set("MCPSMITH_NPM_REGISTRY_BASE_URL", &server);
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::NpmPackage);
+        assert_eq!(
+            server.source_grounding.evidence_level,
+            SourceEvidenceLevel::SourceInspected
+        );
+        assert_eq!(
+            server.source_grounding.package_version.as_deref(),
+            Some("1.55.0")
+        );
+        assert_eq!(
+            server.source_grounding.homepage.as_deref(),
+            Some("https://playwright.dev")
+        );
+        assert_eq!(
+            server.source_grounding.repository_url.as_deref(),
+            Some("https://github.com/microsoft/playwright-mcp")
+        );
+        assert_eq!(server.source_grounding.inspected_urls.len(), 1);
+    }
+
+    #[test]
+    fn discover_enriches_pypi_package_from_remote_registry() {
+        let _guard = source_env_lock().lock().unwrap();
+        let server = spawn_http_server(vec![(
+            "/pypi/acme-memory-mcp/json",
+            "200 OK",
+            r#"{"info":{"name":"acme-memory-mcp","version":"0.4.1","project_urls":{"Homepage":"https://example.com/memory","Repository":"https://github.com/acme/memory-mcp"}}}"#,
+        )]);
+        let _fetch = EnvVarGuard::set("MCPSMITH_SOURCE_FETCH", "1");
+        let _registry = EnvVarGuard::set("MCPSMITH_PYPI_BASE_URL", &server);
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "mcpServers": {
+    "memory": {
+      "command": "uvx",
+      "args": ["acme-memory-mcp"]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::PypiPackage);
+        assert_eq!(
+            server.source_grounding.evidence_level,
+            SourceEvidenceLevel::SourceInspected
+        );
+        assert_eq!(
+            server.source_grounding.package_version.as_deref(),
+            Some("0.4.1")
+        );
+        assert_eq!(
+            server.source_grounding.homepage.as_deref(),
+            Some("https://example.com/memory")
+        );
+        assert_eq!(
+            server.source_grounding.repository_url.as_deref(),
+            Some("https://github.com/acme/memory-mcp")
+        );
+    }
+
+    #[test]
+    fn discover_enriches_repository_url_from_remote_manifest() {
+        let _guard = source_env_lock().lock().unwrap();
+        let content = base64::engine::general_purpose::STANDARD.encode(
+            r#"{"name":"repo-mcp","version":"2.0.0","homepage":"https://example.com/repo-mcp"}"#,
+        );
+        let body = format!(r#"{{"encoding":"base64","content":"{content}"}}"#);
+        let server = spawn_http_server(vec![(
+            "/repos/acme/repo-mcp/contents/package.json",
+            "200 OK",
+            Box::leak(body.into_boxed_str()),
+        )]);
+        let _fetch = EnvVarGuard::set("MCPSMITH_SOURCE_FETCH", "1");
+        let _github = EnvVarGuard::set("MCPSMITH_GITHUB_API_BASE_URL", &server);
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("settings.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+  "mcpServers": {
+    "repo-backed": {
+      "command": "custom-mcp",
+      "repository": "https://github.com/acme/repo-mcp"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let inventory = discover_from_sources(&[ConfigSource {
+            label: "fixture".to_string(),
+            path: config_path,
+        }])
+        .unwrap();
+        let server = &inventory.servers[0];
+        assert_eq!(server.source_grounding.kind, SourceKind::RepositoryUrl);
+        assert_eq!(
+            server.source_grounding.evidence_level,
+            SourceEvidenceLevel::SourceInspected
+        );
+        assert_eq!(
+            server.source_grounding.package_name.as_deref(),
+            Some("repo-mcp")
+        );
+        assert_eq!(
+            server.source_grounding.package_version.as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            server.source_grounding.homepage.as_deref(),
+            Some("https://example.com/repo-mcp")
+        );
+        assert!(
+            server
+                .source_grounding
+                .inspected_urls
+                .iter()
+                .any(|url| url.contains("/repos/acme/repo-mcp/contents/package.json"))
         );
     }
 }
