@@ -22,8 +22,9 @@ Current working behavior already includes:
 - atomic apply
 - output targeting `~/.agents/skills/`
 
-What is still missing is the remaining standalone productization work:
-- reusable shared test support and final live MCP matrix cleanup
+The standalone productization work described here is now complete. The remaining
+notes under completed tasks are future enhancement backlog, not release-blocking
+work.
 
 All work below must happen in `mcpsmith`.
 
@@ -38,7 +39,7 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | MS-02 | completed | `mcpsmith` | done | MS-01 | internal module decomposition |
 | MS-03 | completed | `mcpsmith` | done | MS-01, MS-02 | source-grounded dossier pipeline |
 | MS-04 | completed | `mcpsmith` | done | MS-01, MS-02 | real installed skill-pack output |
-| MS-05 | in progress | `mcpsmith` | now | MS-01 for final shape | reusable test harness and live MCP matrix |
+| MS-05 | completed | `mcpsmith` | done | MS-01 for final shape | reusable test harness and live MCP matrix |
 | MS-06 | completed | `mcpsmith` | done | MS-00, MS-01 | docs, examples, AGENTS, llms |
 | MS-07 | completed | `mcpsmith` | done | MS-00, MS-05, MS-06 | CI and release readiness |
 
@@ -292,7 +293,7 @@ Completed on 2026-03-08 with:
 - atomic apply rollback coverage added so failed MCP config mutation removes the installed skill directories again
 - CLI coverage updated in `tests/cli.rs` and module smoke coverage updated in `crates/mcpsmith-core/tests/module_smoke.rs`
 
-### MS-05 [in progress] Test Harness And Live MCP Matrix
+### MS-05 [completed] Test Harness And Live MCP Matrix
 Extract reusable mock MCP helpers into shared test support.
 
 Add reusable smoke scripts for:
@@ -329,12 +330,16 @@ Progress:
   - optional `xcodebuildmcp@latest`
 - smoke asset coverage now checks fixture hydration and expected probe inputs
 
-Remaining:
-- extract duplicated mock MCP/backend helpers from `tests/cli.rs` into reusable Rust-side test support
-- run and preserve the live matrix evidence as part of a repeatable workflow, not just checked-in scripts/fixtures
-
 Done when:
 - another agent can run deterministic mocks and at least two live MCP packages
+
+Completed on 2026-03-10 with:
+- shared Rust-side integration-test support extracted under `/Users/anicolae/code/mcpsmith/tests/support/mod.rs`
+- `tests/cli.rs` migrated to reusable temp-workspace, config-writing, and mock runtime/backend helpers
+- repeatable live-matrix execution and preserved evidence now live in:
+  - `/Users/anicolae/code/mcpsmith/scripts/smoke/live_public_mcp.sh`
+  - `/Users/anicolae/code/mcpsmith/scripts/smoke/cli_verify_smoke.sh`
+  - `/Users/anicolae/code/mcpsmith/.github/workflows/live-smoke.yml`
 
 ### MS-06 [completed] Docs And Examples
 Expand `/Users/anicolae/code/mcpsmith/README.md` into full standalone documentation:
