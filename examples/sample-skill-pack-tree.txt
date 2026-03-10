@@ -1,0 +1,7 @@
+~/.agents/skills/
+~/.agents/skills/playwright
+~/.agents/skills/playwright/SKILL.md
+~/.agents/skills/playwright/.mcpsmith
+~/.agents/skills/playwright/.mcpsmith/manifest.json
+~/.agents/skills/playwright--execute
+~/.agents/skills/playwright--execute/SKILL.md

@@ -37,7 +37,7 @@ All work for this plan stays in `mcpsmith`. `distill` is historical context only
 
 ## Backend and probe behavior
 
-- Backend selection today is: explicit `--backend`, then config `convert.backend_preference`, then auto-detect installed backends in `codex` then `claude` order.
+- Backend selection today is: explicit `--backend`, then config `backend.preference`, then auto-detect installed backends in `codex` then `claude` order. Legacy `convert.*` keys are input-only compatibility.
 - Use `--backend-health` when debugging backend availability.
 - Runtime probe controls are `--allow-side-effects`, `--probe-timeout-seconds <N>`, and `--probe-retries <N>`.
 - Test and local backend overrides use `MCPSMITH_CODEX_COMMAND` and `MCPSMITH_CLAUDE_COMMAND`.

@@ -1,0 +1,101 @@
+name: Live Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_optional_xcodebuildmcp:
+        description: "Run the optional xcodebuildmcp smoke job"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  memory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run memory smoke
+        run: ./scripts/smoke/live_public_mcp.sh --server memory --run-dir .codex-runtime/github-actions/live-smoke/memory
+
+      - name: Upload memory artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-memory
+          path: .codex-runtime/github-actions/live-smoke/memory
+
+  chrome-devtools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Run chrome-devtools smoke
+        run: ./scripts/smoke/live_public_mcp.sh --server chrome-devtools --run-dir .codex-runtime/github-actions/live-smoke/chrome-devtools
+
+      - name: Upload chrome-devtools artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-chrome-devtools
+          path: .codex-runtime/github-actions/live-smoke/chrome-devtools
+
+  xcodebuildmcp:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_optional_xcodebuildmcp
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run xcodebuildmcp smoke
+        run: ./scripts/smoke/live_public_mcp.sh --server xcodebuildmcp --run-dir .codex-runtime/github-actions/live-smoke/xcodebuildmcp
+
+      - name: Upload xcodebuildmcp artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-xcodebuildmcp
+          path: .codex-runtime/github-actions/live-smoke/xcodebuildmcp

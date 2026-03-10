@@ -16,12 +16,21 @@ fn repo_bootstrap_files_exist() {
     for path in [
         "AGENTS.md",
         "llms.txt",
+        "README.md",
         "Makefile",
+        "docs/architecture.md",
+        "docs/release-checklist.md",
+        "examples/sample-mcp-config.json",
+        "examples/sample-dossier.json",
+        "examples/sample-contract-report.json",
+        "examples/sample-skill-pack-tree.txt",
         "scripts/local-checks.sh",
         "scripts/smoke/common.sh",
         "scripts/smoke/mock_fixture_flow.sh",
         "scripts/smoke/live_public_mcp.sh",
         "scripts/smoke/cli_verify_smoke.sh",
+        ".github/workflows/ci.yml",
+        ".github/workflows/live-smoke.yml",
         "tests/fixtures/live/memory-smoke.dossier.json",
         "tests/fixtures/live/chrome-devtools-smoke.dossier.json",
         "tests/fixtures/live/xcodebuildmcp-smoke.dossier.json",
@@ -60,6 +69,123 @@ fn llms_summary_documents_agent_entrypoints() {
         "Retained diagnostics for the standalone surface: `list`, `inspect`, `verify`",
     ] {
         assert!(llms.contains(needle), "llms.txt missing {needle}");
+    }
+}
+
+#[test]
+fn readme_covers_product_docs_and_examples() {
+    let readme = read_repo_file("README.md");
+
+    for needle in [
+        "# mcpsmith",
+        "## What mcpsmith does",
+        "## How it works",
+        "## One-shot flow",
+        "## Stepwise flow",
+        "## Config shape",
+        "## Backend behavior",
+        "## Runtime probe semantics",
+        "## Output skill-pack layout",
+        "## Examples",
+        "## Troubleshooting",
+        "## Isolated verification",
+    ] {
+        assert!(readme.contains(needle), "README.md missing {needle}");
+    }
+}
+
+#[test]
+fn architecture_and_release_docs_cover_required_topics() {
+    let architecture = read_repo_file("docs/architecture.md");
+    for needle in [
+        "# mcpsmith architecture",
+        "## Config discovery",
+        "## Runtime introspection",
+        "## Backend selection",
+        "## Source grounding",
+        "## Build",
+        "## Contract-test",
+        "## Apply",
+    ] {
+        assert!(
+            architecture.contains(needle),
+            "docs/architecture.md missing {needle}"
+        );
+    }
+
+    let release = read_repo_file("docs/release-checklist.md");
+    for needle in [
+        "# Release checklist",
+        "Version bump",
+        "Release notes",
+        "CI green",
+        "Live smoke green",
+        "Publish readiness",
+    ] {
+        assert!(
+            release.contains(needle),
+            "docs/release-checklist.md missing {needle}"
+        );
+    }
+}
+
+#[test]
+fn ci_workflows_cover_local_checks_and_live_smoke() {
+    let ci = read_repo_file(".github/workflows/ci.yml");
+    for needle in [
+        "cargo fmt --all --check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test --workspace",
+    ] {
+        assert!(
+            ci.contains(needle),
+            ".github/workflows/ci.yml missing {needle}"
+        );
+    }
+
+    let live_smoke = read_repo_file(".github/workflows/live-smoke.yml");
+    for needle in [
+        "workflow_dispatch:",
+        "schedule:",
+        "scripts/smoke/live_public_mcp.sh --server memory",
+        "scripts/smoke/live_public_mcp.sh --server chrome-devtools",
+    ] {
+        assert!(
+            live_smoke.contains(needle),
+            ".github/workflows/live-smoke.yml missing {needle}"
+        );
+    }
+}
+
+#[test]
+fn cargo_manifests_include_release_metadata() {
+    let root_manifest = read_repo_file("Cargo.toml");
+    for needle in [
+        "description = ",
+        "license = ",
+        "repository = ",
+        "keywords = ",
+        "categories = ",
+        "mcpsmith-core = { version = ",
+    ] {
+        assert!(
+            root_manifest.contains(needle),
+            "Cargo.toml missing {needle}"
+        );
+    }
+
+    let core_manifest = read_repo_file("crates/mcpsmith-core/Cargo.toml");
+    for needle in [
+        "description = ",
+        "license = ",
+        "repository = ",
+        "keywords = ",
+        "categories = ",
+    ] {
+        assert!(
+            core_manifest.contains(needle),
+            "crates/mcpsmith-core/Cargo.toml missing {needle}"
+        );
     }
 }
 

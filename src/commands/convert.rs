@@ -37,9 +37,9 @@ fn v3_options(
         backend,
         backend_auto,
         backend_config: ConvertBackendConfig {
-            preference: map_backend_preference(&app_config.convert.backend_preference),
-            timeout_seconds: app_config.convert.backend_timeout_seconds,
-            chunk_size: app_config.convert.backend_chunk_size,
+            preference: map_backend_preference(&app_config.backend.preference),
+            timeout_seconds: app_config.backend.timeout_seconds,
+            chunk_size: app_config.backend.chunk_size,
         },
     })
 }
@@ -51,11 +51,10 @@ fn contract_test_options(
     probe_retries_override: Option<u32>,
 ) -> ContractTestOptions {
     ContractTestOptions {
-        allow_side_effects: allow_side_effects_override
-            || app_config.convert.allow_side_effect_probes,
+        allow_side_effects: allow_side_effects_override || app_config.probe.allow_side_effects,
         probe_timeout_seconds: probe_timeout_seconds_override
-            .unwrap_or(app_config.convert.probe_timeout_seconds),
-        probe_retries: probe_retries_override.unwrap_or(app_config.convert.probe_retries),
+            .unwrap_or(app_config.probe.timeout_seconds),
+        probe_retries: probe_retries_override.unwrap_or(app_config.probe.retries),
     }
 }
 

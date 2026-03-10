@@ -24,8 +24,6 @@ Current working behavior already includes:
 
 What is still missing is the remaining standalone productization work:
 - reusable shared test support and final live MCP matrix cleanup
-- full standalone docs and examples
-- CI/release readiness
 
 All work below must happen in `mcpsmith`.
 
@@ -41,8 +39,8 @@ Use one `jj` change per task family. Each task should be independently ownable b
 | MS-03 | completed | `mcpsmith` | done | MS-01, MS-02 | source-grounded dossier pipeline |
 | MS-04 | completed | `mcpsmith` | done | MS-01, MS-02 | real installed skill-pack output |
 | MS-05 | in progress | `mcpsmith` | now | MS-01 for final shape | reusable test harness and live MCP matrix |
-| MS-06 | pending | `mcpsmith` | after MS-01 | MS-00, MS-01 | docs, examples, AGENTS, llms |
-| MS-07 | pending | `mcpsmith` | after MS-00 | MS-00, MS-05, MS-06 | CI and release readiness |
+| MS-06 | completed | `mcpsmith` | done | MS-00, MS-01 | docs, examples, AGENTS, llms |
+| MS-07 | completed | `mcpsmith` | done | MS-00, MS-05, MS-06 | CI and release readiness |
 
 ## Global Working Rules
 
@@ -338,7 +336,7 @@ Remaining:
 Done when:
 - another agent can run deterministic mocks and at least two live MCP packages
 
-### MS-06 [pending] Docs And Examples
+### MS-06 [completed] Docs And Examples
 Expand `/Users/anicolae/code/mcpsmith/README.md` into full standalone documentation:
 - what `mcpsmith` does
 - how it works
@@ -369,7 +367,18 @@ Add one architecture doc describing:
 Done when:
 - a new engineer can understand the product without reading extracted code history
 
-### MS-07 [pending] CI And Release Readiness
+Completed on 2026-03-10 with:
+- `/Users/anicolae/code/mcpsmith/README.md` expanded into standalone product docs covering one-shot and stepwise flows, config shape, backend behavior, probe semantics, skill-pack layout, troubleshooting, and isolated verification
+- example artifacts added under `/Users/anicolae/code/mcpsmith/examples/`:
+  - `sample-mcp-config.json`
+  - `sample-dossier.json`
+  - `sample-contract-report.json`
+  - `sample-skill-pack-tree.txt`
+- architecture doc added at `/Users/anicolae/code/mcpsmith/docs/architecture.md`
+- agent-facing docs corrected to the standalone config naming in `/Users/anicolae/code/mcpsmith/AGENTS.md` and `/Users/anicolae/code/mcpsmith/llms.txt`
+- canonical app-config parsing now accepts documented `backend.*` and `probe.*` keys while keeping legacy `convert.*` input compatibility, with coverage in `/Users/anicolae/code/mcpsmith/src/config/mod.rs` and `/Users/anicolae/code/mcpsmith/tests/repo_bootstrap.rs`
+
+### MS-07 [completed] CI And Release Readiness
 Add CI for:
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets -- -D warnings`
@@ -395,6 +404,13 @@ Add release checklist:
 
 Done when:
 - `mcpsmith` can be released independently from `distill`
+
+Completed on 2026-03-10 with:
+- CI workflow added at `/Users/anicolae/code/mcpsmith/.github/workflows/ci.yml` for `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`
+- separate live-smoke workflow added at `/Users/anicolae/code/mcpsmith/.github/workflows/live-smoke.yml` with scheduled/manual public MCP smoke jobs for `memory` and `chrome-devtools`, plus optional manual `xcodebuildmcp`
+- release checklist added at `/Users/anicolae/code/mcpsmith/docs/release-checklist.md`
+- package metadata completed in `/Users/anicolae/code/mcpsmith/Cargo.toml` and `/Users/anicolae/code/mcpsmith/crates/mcpsmith-core/Cargo.toml`, including versioned internal dependency wiring for publish readiness
+- bootstrap coverage extended in `/Users/anicolae/code/mcpsmith/tests/repo_bootstrap.rs` so docs, examples, workflows, and manifest metadata stay pinned
 
 ## Recommended Parallel Order
 

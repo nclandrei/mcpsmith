@@ -1,0 +1,102 @@
+{
+  "format_version": 5,
+  "generated_at": "2026-03-10T09:00:00Z",
+  "dossiers": [
+    {
+      "generated_at": "2026-03-10T09:00:00Z",
+      "format_version": 5,
+      "server": {
+        "id": "custom-1:playwright",
+        "name": "playwright",
+        "source_label": "custom-1",
+        "source_path": "/tmp/mcpsmith-demo/mcp.json",
+        "purpose": "Read-only browser helpers",
+        "command": "/tmp/mcpsmith-demo/mock-mcp.sh",
+        "args": [],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 0,
+        "permission_hints": [
+          "read-only"
+        ],
+        "inferred_permission": "read-only",
+        "recommendation": "replace-candidate",
+        "recommendation_reason": "Read-only and no credential requirements; good candidate for skill replacement.",
+        "source_grounding": {
+          "kind": "local-path",
+          "evidence_level": "source-inspected",
+          "inspected": true,
+          "entrypoint": "/tmp/mcpsmith-demo/mock-mcp.sh",
+          "inspected_paths": [
+            "/tmp/mcpsmith-demo/mock-mcp.sh"
+          ]
+        }
+      },
+      "runtime_tools": [
+        {
+          "name": "execute",
+          "description": "Tool execute",
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "tool_dossiers": [
+        {
+          "name": "execute",
+          "explanation": "Run execute",
+          "recipe": [
+            "validate input",
+            "execute execute",
+            "verify output"
+          ],
+          "evidence": [
+            "evidence-level: source-inspected",
+            "runtime metadata",
+            "runtime-command: /tmp/mcpsmith-demo/mock-mcp.sh",
+            "runtime-tool-description: Tool execute",
+            "source-entrypoint: /tmp/mcpsmith-demo/mock-mcp.sh"
+          ],
+          "confidence": 0.9,
+          "contract_tests": [
+            {
+              "probe": "happy-path",
+              "expected": "valid output",
+              "method": "run valid request",
+              "applicable": true
+            },
+            {
+              "probe": "invalid-input",
+              "expected": "returns validation error",
+              "method": "run malformed request",
+              "applicable": true
+            },
+            {
+              "probe": "side-effect-safety",
+              "expected": "requires confirmation for mutations",
+              "method": "run check/dry-run first",
+              "applicable": true
+            }
+          ],
+          "probe_input_source": "synthesized"
+        }
+      ],
+      "server_gate": "ready",
+      "gate_reasons": [],
+      "backend_used": "codex",
+      "backend_fallback_used": false,
+      "backend_diagnostics": [
+        "Auto-selected first available backend (codex, then claude).",
+        "backend=codex available=true diagnostics=mock-codex responded to '--version'."
+      ]
+    }
+  ]
+}

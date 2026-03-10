@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-03-10T09:00:02Z",
+  "passed": true,
+  "servers": [
+    {
+      "server_id": "custom-1:playwright",
+      "passed": true,
+      "introspection_ok": true,
+      "missing_runtime_tools": [],
+      "tools": [
+        {
+          "tool": "execute",
+          "passed": true,
+          "probes": [
+            {
+              "probe": "happy-path",
+              "passed": true,
+              "skipped": false,
+              "executed": true,
+              "details": "Probe executed successfully (source=synthesized).",
+              "request_args_preview": "{\"query\":\"sample\"}",
+              "response_preview": "{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"ok\",\"type\":\"text\"}],\"isError\":false}}",
+              "duration_ms": 6
+            },
+            {
+              "probe": "invalid-input",
+              "passed": true,
+              "skipped": false,
+              "executed": true,
+              "details": "Probe produced expected error path (source=synthesized).",
+              "request_args_preview": "{}",
+              "response_preview": "{\"error\":{\"code\":-32602,\"message\":\"invalid query\"},\"id\":2,\"jsonrpc\":\"2.0\"}",
+              "duration_ms": 5
+            },
+            {
+              "probe": "side-effect-safety",
+              "passed": true,
+              "skipped": true,
+              "executed": false,
+              "details": "Tool classified as read-only/unknown; side-effect probe safely skipped."
+            }
+          ],
+          "reasons": []
+        }
+      ],
+      "reasons": []
+    }
+  ]
+}

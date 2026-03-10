@@ -25,7 +25,7 @@
 ## Runtime data
 - Config path: `~/.mcpsmith/config.yaml`
 - Installed skills path: `~/.agents/skills/`
-- Backend selection: explicit `--backend`, then config `convert.backend_preference`, then auto-detect `codex`, then `claude`
+- Backend selection: explicit `--backend`, then config `backend.preference`, then auto-detect `codex`, then `claude`
 - Probe controls: `--allow-side-effects`, `--probe-timeout-seconds <N>`, `--probe-retries <N>`
 - Live probing uses runtime `tools/list` introspection and `tools/call` checks
 - Retained diagnostics for the standalone surface: `list`, `inspect`, `verify`

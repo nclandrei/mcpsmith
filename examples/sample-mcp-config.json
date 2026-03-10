@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "/tmp/mcpsmith-demo/mock-mcp.sh",
+      "description": "Read-only browser helpers",
+      "readOnly": true
+    }
+  }
+}
