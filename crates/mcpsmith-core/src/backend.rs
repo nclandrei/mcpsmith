@@ -12,10 +12,18 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
+
+const CODEX_REASONING_EFFORT_MEDIUM: &str = "medium";
+const CODEX_REASONING_EFFORT_LOW: &str = "low";
+const WORKFLOW_PROMPT_MAX_DERIVATION_EVIDENCE: usize = 4;
+const WORKFLOW_PROMPT_EXCERPT_PREVIEW_CHARS: usize = 220;
+const WORKFLOW_PROMPT_MAX_INPUT_NAMES: usize = 12;
+const WORKFLOW_PROMPT_MAX_INSPECTED_ITEMS: usize = 6;
 
 const TOOL_ENRICHMENT_SCHEMA: &str = r#"{
   "type": "object",
@@ -125,14 +133,15 @@ fn invoke_codex_structured_with_command(
         .with_context(|| format!("Failed to write {}", schema_path.display()))?;
     let temp_files = vec![schema_path.clone(), output_path.clone()];
 
+    let backend_home = prepare_backend_home(ConvertBackendName::Codex)?;
     let mut codex = Command::new(command);
-    configure_backend_command(&mut codex, ConvertBackendName::Codex);
+    apply_backend_home(&mut codex, backend_home.as_ref());
     let mut child = match codex
         .args([
             "exec",
             "--ephemeral",
             "-c",
-            "model_reasoning_effort=\"medium\"",
+            &codex_reasoning_option(CODEX_REASONING_EFFORT_MEDIUM),
             "--output-schema",
             schema_path.to_string_lossy().as_ref(),
             "--output-last-message",
@@ -459,14 +468,10 @@ fn build_workflow_chunk_prompt(
     tools: &[RuntimeTool],
     all_runtime_tools: &[RuntimeTool],
 ) -> String {
-    let source_json = serde_json::to_string_pretty(&serde_json::json!({
-        "command": &server.command,
-        "args": &server.args,
-        "url": &server.url,
-        "source_grounding": &server.source_grounding,
-    }))
-    .unwrap_or_else(|_| "{}".to_string());
-    let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_string());
+    let source_json = serde_json::to_string_pretty(&workflow_source_grounding_summary(server))
+        .unwrap_or_else(|_| "{}".to_string());
+    let tools_json = serde_json::to_string_pretty(&workflow_prompt_tool_summaries(tools))
+        .unwrap_or_else(|_| "[]".to_string());
     let all_tool_names = all_runtime_tools
         .iter()
         .map(|tool| normalize_tool_name(&tool.name))
@@ -486,11 +491,11 @@ If the evidence is insufficient for a concrete replacement workflow, leave the w
 \n\
 Server name: {}\n\
 Server purpose: {}\n\
-Source grounding:\n{}\n\
+Source grounding summary:\n{}\n\
 \n\
 All runtime tool names:\n{}\n\
 \n\
-Runtime tools in this chunk:\n{}\n\
+Runtime tools in this chunk (compact summary):\n{}\n\
 \n\
 Requirements per workflow:\n\
 - id: stable slug-like workflow id\n\
@@ -508,6 +513,103 @@ Return only those fields. mcpsmith will derive any remaining optional sections a
 Generate at least one workflow for each runtime tool in the chunk when the evidence supports a concrete standalone procedure.\n",
         server.name, server.purpose, source_json, all_tools_json, tools_json
     )
+}
+
+fn workflow_source_grounding_summary(server: &MCPServerProfile) -> Value {
+    serde_json::json!({
+        "kind": &server.source_grounding.kind,
+        "evidence_level": &server.source_grounding.evidence_level,
+        "inspected": server.source_grounding.inspected,
+        "entrypoint": &server.source_grounding.entrypoint,
+        "package_name": &server.source_grounding.package_name,
+        "package_version": &server.source_grounding.package_version,
+        "homepage": &server.source_grounding.homepage,
+        "repository_url": &server.source_grounding.repository_url,
+        "inspected_paths": server
+            .source_grounding
+            .inspected_paths
+            .iter()
+            .take(WORKFLOW_PROMPT_MAX_INSPECTED_ITEMS)
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "inspected_urls": server
+            .source_grounding
+            .inspected_urls
+            .iter()
+            .take(WORKFLOW_PROMPT_MAX_INSPECTED_ITEMS)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "derivation_evidence": server
+            .source_grounding
+            .derivation_evidence
+            .iter()
+            .take(WORKFLOW_PROMPT_MAX_DERIVATION_EVIDENCE)
+            .map(|item| {
+                serde_json::json!({
+                    "kind": item.kind,
+                    "source": item.source,
+                    "excerpt_preview": clipped_preview(
+                        item.excerpt.trim(),
+                        WORKFLOW_PROMPT_EXCERPT_PREVIEW_CHARS,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn workflow_prompt_tool_summaries(tools: &[RuntimeTool]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(workflow_prompt_tool_summary)
+        .collect::<Vec<_>>()
+}
+
+fn workflow_prompt_tool_summary(tool: &RuntimeTool) -> Value {
+    let (required_inputs, input_names) = summarize_runtime_tool_inputs(tool.input_schema.as_ref());
+    serde_json::json!({
+        "name": normalize_tool_name(&tool.name),
+        "description": &tool.description,
+        "required_inputs": required_inputs,
+        "input_names": input_names,
+    })
+}
+
+fn summarize_runtime_tool_inputs(schema: Option<&Value>) -> (Vec<String>, Vec<String>) {
+    let Some(schema) = schema else {
+        return (vec![], vec![]);
+    };
+
+    let mut required_inputs = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    required_inputs.sort();
+    required_inputs.dedup();
+
+    let mut input_names = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|properties| properties.keys())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    input_names.sort();
+    input_names.dedup();
+    input_names.truncate(WORKFLOW_PROMPT_MAX_INPUT_NAMES);
+
+    (required_inputs, input_names)
+}
+
+fn codex_reasoning_option(reasoning_effort: &str) -> String {
+    format!("model_reasoning_effort=\"{reasoning_effort}\"")
 }
 
 fn workflow_chunk_schema() -> String {
@@ -622,6 +724,7 @@ impl AgentBackend for CodexBackend {
             prompt,
             schema_json,
             self.timeout_seconds,
+            CODEX_REASONING_EFFORT_MEDIUM,
         )
     }
 
@@ -631,6 +734,7 @@ impl AgentBackend for CodexBackend {
             prompt,
             schema_json,
             self.timeout_seconds,
+            CODEX_REASONING_EFFORT_LOW,
         )
     }
 
@@ -647,6 +751,12 @@ impl AgentBackend for CodexBackend {
 struct ClaudeBackend {
     command: String,
     timeout_seconds: u64,
+}
+
+#[derive(Debug)]
+struct PreparedBackendHome {
+    _tempdir: Option<TempDir>,
+    home_path: PathBuf,
 }
 
 impl AgentBackend for ClaudeBackend {
@@ -711,8 +821,15 @@ fn command_health(name: ConvertBackendName, command: &str) -> BackendHealthStatu
     let mut diagnostics = vec![];
 
     for args in checks {
+        let backend_home = match prepare_backend_home(name) {
+            Ok(home) => home,
+            Err(err) => {
+                diagnostics.push(format!("{command} backend home setup failed: {err}"));
+                continue;
+            }
+        };
         let mut probe = Command::new(command);
-        configure_backend_command(&mut probe, name);
+        apply_backend_home(&mut probe, backend_home.as_ref());
         match probe
             .args(args)
             .stdout(Stdio::null())
@@ -856,21 +973,23 @@ fn invoke_codex_structured_with_timeout(
     prompt: &str,
     schema_json: &str,
     timeout_seconds: u64,
+    reasoning_effort: &str,
 ) -> Result<String> {
     let schema_path = create_temp_file_path("mcpsmith-v3-codex-schema", "json")?;
     let output_path = create_temp_file_path("mcpsmith-v3-codex-output", "txt")?;
     fs::write(&schema_path, schema_json)
         .with_context(|| format!("Failed to write {}", schema_path.display()))?;
 
+    let backend_home = prepare_backend_home(ConvertBackendName::Codex)?;
     let mut codex = Command::new(command);
-    configure_backend_command(&mut codex, ConvertBackendName::Codex);
+    apply_backend_home(&mut codex, backend_home.as_ref());
     let output = run_command_with_timeout(
         codex
             .args([
                 "exec",
                 "--ephemeral",
                 "-c",
-                "model_reasoning_effort=\"medium\"",
+                &codex_reasoning_option(reasoning_effort),
                 "--output-schema",
                 schema_path.to_string_lossy().as_ref(),
                 "--output-last-message",
@@ -924,8 +1043,9 @@ fn invoke_claude_structured_with_timeout(
         schema_json, prompt
     );
 
+    let backend_home = prepare_backend_home(ConvertBackendName::Claude)?;
     let mut claude = Command::new(command);
-    configure_backend_command(&mut claude, ConvertBackendName::Claude);
+    apply_backend_home(&mut claude, backend_home.as_ref());
     let output = run_command_with_timeout(
         claude
             .args([
@@ -1071,9 +1191,9 @@ fn extract_claude_json_payload(stdout: &str) -> Result<String> {
     bail!("No JSON payload found in Claude envelope.")
 }
 
-fn configure_backend_command(command: &mut Command, backend: ConvertBackendName) {
-    if let Some(home) = backend_home_override(backend) {
-        command.env("HOME", home);
+fn apply_backend_home(command: &mut Command, backend_home: Option<&PreparedBackendHome>) {
+    if let Some(home) = backend_home {
+        command.env("HOME", &home.home_path);
     }
 }
 
@@ -1086,6 +1206,61 @@ fn backend_home_override(backend: ConvertBackendName) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn prepare_backend_home(backend: ConvertBackendName) -> Result<Option<PreparedBackendHome>> {
+    match backend {
+        ConvertBackendName::Codex => prepare_codex_backend_home(),
+        ConvertBackendName::Claude => Ok(backend_home_override(ConvertBackendName::Claude).map(
+            |home| PreparedBackendHome {
+                _tempdir: None,
+                home_path: PathBuf::from(home),
+            },
+        )),
+    }
+}
+
+fn prepare_codex_backend_home() -> Result<Option<PreparedBackendHome>> {
+    let source_home = backend_home_override(ConvertBackendName::Codex)
+        .map(PathBuf::from)
+        .or_else(current_home_path);
+    let Some(source_home) = source_home else {
+        return Ok(None);
+    };
+
+    let auth_source = source_home.join(".codex").join("auth.json");
+    if !auth_source.is_file() {
+        return Ok(None);
+    }
+
+    let tempdir = tempfile::tempdir().context("Failed to create isolated Codex home")?;
+    let codex_dir = tempdir.path().join(".codex");
+    fs::create_dir_all(&codex_dir)
+        .with_context(|| format!("Failed to create {}", codex_dir.display()))?;
+    let auth_dest = codex_dir.join("auth.json");
+    fs::copy(&auth_source, &auth_dest).with_context(|| {
+        format!(
+            "Failed to copy Codex auth from {} to {}",
+            auth_source.display(),
+            auth_dest.display()
+        )
+    })?;
+
+    Ok(Some(PreparedBackendHome {
+        _tempdir: Some(tempdir),
+        home_path: codex_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/")),
+    }))
+}
+
+fn current_home_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| home.trim().to_string())
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn extract_embedded_json(text: &str) -> Option<String> {
@@ -1172,6 +1347,110 @@ mod tests {
         assert!(prompt.contains("https://github.com/microsoft/playwright-mcp"));
         assert!(prompt.contains("native_steps"));
         assert!(prompt.contains("Do not run shell commands"));
+    }
+
+    #[test]
+    fn build_workflow_chunk_prompt_clips_derivation_excerpts() {
+        let server = MCPServerProfile {
+            id: "fixture:slow".to_string(),
+            name: "slow-server".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Slow workflow synthesis".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@acme/slow".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 1,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "fixture".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::SourceInspected,
+                inspected: true,
+                entrypoint: None,
+                package_name: Some("@acme/slow".to_string()),
+                package_version: Some("1.0.0".to_string()),
+                homepage: Some("https://example.com/slow".to_string()),
+                repository_url: Some("https://github.com/acme/slow".to_string()),
+                inspected_paths: vec![],
+                inspected_urls: vec!["https://example.com/slow/readme".to_string()],
+                derivation_evidence: vec![crate::DerivationEvidence {
+                    kind: crate::DerivationEvidenceKind::ReadmeSnippet,
+                    source: "https://example.com/slow/readme".to_string(),
+                    excerpt: "A".repeat(600),
+                }],
+            },
+        };
+        let tools = vec![RuntimeTool {
+            name: "slow_tool".to_string(),
+            description: Some("Slow tool".to_string()),
+            input_schema: None,
+        }];
+
+        let prompt = build_workflow_chunk_prompt(&server, &tools, &tools);
+        assert!(prompt.contains("\"excerpt_preview\""));
+        assert!(!prompt.contains(&"A".repeat(320)));
+    }
+
+    #[test]
+    fn build_workflow_chunk_prompt_uses_compact_tool_summaries() {
+        let server = MCPServerProfile {
+            id: "fixture:compact".to_string(),
+            name: "compact-server".to_string(),
+            source_label: "fixture".to_string(),
+            source_path: PathBuf::from("/tmp/settings.json"),
+            purpose: "Compact prompts".to_string(),
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string(), "@acme/compact".to_string()],
+            url: None,
+            env_keys: vec![],
+            declared_tool_count: 1,
+            permission_hints: vec![],
+            inferred_permission: PermissionLevel::ReadOnly,
+            recommendation: ConversionRecommendation::ReplaceCandidate,
+            recommendation_reason: "fixture".to_string(),
+            source_grounding: crate::SourceGrounding {
+                kind: crate::SourceKind::NpmPackage,
+                evidence_level: SourceEvidenceLevel::ConfigOnly,
+                inspected: false,
+                entrypoint: None,
+                package_name: Some("@acme/compact".to_string()),
+                package_version: Some("1.0.0".to_string()),
+                homepage: None,
+                repository_url: None,
+                inspected_paths: vec![],
+                inspected_urls: vec![],
+                derivation_evidence: vec![],
+            },
+        };
+        let tools = vec![RuntimeTool {
+            name: "compact_tool".to_string(),
+            description: Some("Compact tool".to_string()),
+            input_schema: Some(serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": ["projectPath"],
+                "properties": {
+                    "projectPath": {
+                        "type": "string",
+                        "description": "Path to the Xcode project."
+                    },
+                    "extraArgs": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                }
+            })),
+        }];
+
+        let prompt = build_workflow_chunk_prompt(&server, &tools, &tools);
+        assert!(prompt.contains("\"required_inputs\""));
+        assert!(prompt.contains("\"input_names\""));
+        assert!(!prompt.contains("\"$schema\""));
+        assert!(!prompt.contains("\"properties\""));
     }
 
     #[test]
@@ -1349,6 +1628,36 @@ mod tests {
         unsafe {
             std::env::remove_var("MCPSMITH_CODEX_HOME");
             std::env::remove_var("MCPSMITH_CLAUDE_HOME");
+        }
+    }
+
+    #[test]
+    fn prepare_backend_home_for_codex_copies_auth_without_config() {
+        let _guard = backend_env_lock().lock().unwrap();
+        let source_home = tempfile::tempdir().expect("source home tempdir");
+        let source_codex_dir = source_home.path().join(".codex");
+        fs::create_dir_all(&source_codex_dir).expect("create source codex dir");
+        fs::write(source_codex_dir.join("auth.json"), "{\"token\":\"abc\"}").expect("write auth");
+        fs::write(source_codex_dir.join("config.toml"), "mcp = true").expect("write config");
+
+        unsafe {
+            std::env::set_var("MCPSMITH_CODEX_HOME", source_home.path());
+        }
+
+        let prepared = prepare_backend_home(ConvertBackendName::Codex)
+            .expect("prepare backend home")
+            .expect("isolated backend home");
+
+        let isolated_codex_dir = prepared.home_path.join(".codex");
+        assert_ne!(prepared.home_path, source_home.path());
+        assert_eq!(
+            fs::read_to_string(isolated_codex_dir.join("auth.json")).expect("read copied auth"),
+            "{\"token\":\"abc\"}"
+        );
+        assert!(!isolated_codex_dir.join("config.toml").exists());
+
+        unsafe {
+            std::env::remove_var("MCPSMITH_CODEX_HOME");
         }
     }
 }

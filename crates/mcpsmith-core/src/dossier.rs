@@ -468,6 +468,12 @@ fn tool_needs_standalone_workflow(tool: &RuntimeTool) -> bool {
         return false;
     }
 
+    if name.starts_with("snapshot_")
+        && (description.contains("snapshot") || description.contains("view hierarchy"))
+    {
+        return false;
+    }
+
     true
 }
 
@@ -750,5 +756,19 @@ mod tests {
 
         assert!(!tool_needs_standalone_workflow(&session_tool));
         assert!(tool_needs_standalone_workflow(&capability_tool));
+    }
+
+    #[test]
+    fn snapshot_diagnostic_tools_do_not_require_standalone_workflows() {
+        let snapshot_tool = RuntimeTool {
+            name: "snapshot_ui".to_string(),
+            description: Some(
+                "Print view hierarchy with precise view coordinates for visible elements."
+                    .to_string(),
+            ),
+            input_schema: None,
+        };
+
+        assert!(!tool_needs_standalone_workflow(&snapshot_tool));
     }
 }
