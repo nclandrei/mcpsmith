@@ -129,6 +129,42 @@ done
     write_agent_script(path, &body);
 }
 
+pub fn write_counting_mock_mcp_script(path: &Path, count_path: &Path, tool_names: &[&str]) {
+    let tools = tool_names
+        .iter()
+        .map(|name| {
+            format!(
+                r#"{{\"name\":\"{name}\",\"description\":\"Tool {name}\",\"inputSchema\":{{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{{\"query\":{{\"type\":\"string\"}}}}}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let count_path = count_path.to_string_lossy();
+    let body = format!(
+        r#"#!/bin/sh
+printf 'start\n' >> '{count_path}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{tools}]}}}}\n'
+      ;;
+    *'"method":"tools/call"'*)
+      if echo "$line" | grep -q '"query":"'; then
+        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
+      else
+        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid query"}}}}\n'
+      fi
+      ;;
+  esac
+done
+"#
+    );
+    write_agent_script(path, &body);
+}
+
 pub fn write_mock_codex_script(path: &Path) {
     write_mock_codex_script_for(path, &["execute"]);
 }
@@ -221,6 +257,58 @@ while IFS= read -r line; do
         printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
       else
         printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"missing id"}}}}\n'
+      fi
+      ;;
+  esac
+done
+"#
+    );
+    write_agent_script(path, &body);
+}
+
+pub fn write_mock_mcp_context_error_script(path: &Path, tool_name: &str) {
+    let body = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}","description":"inspect workspace state","inputSchema":{{"type":"object","required":["workspaceRoot"],"properties":{{"workspaceRoot":{{"type":"string"}}}}}}}}]}}}}\n'
+      ;;
+    *'"method":"tools/call"'*)
+      if echo "$line" | grep -q '"workspaceRoot":"sample"'; then
+        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ENOENT: no such file or directory, stat '\''sample'\''"}}],"isError":true}}}}\n'
+      else
+        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"missing workspaceRoot"}}}}\n'
+      fi
+      ;;
+  esac
+done
+"#
+    );
+    write_agent_script(path, &body);
+}
+
+pub fn write_mock_mcp_session_defaults_script(path: &Path, tool_name: &str) {
+    let body = format!(
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}","description":"Manage session defaults","inputSchema":{{"type":"object","properties":{{"arch":{{"type":"string","enum":["arm64","x86_64"]}}}}}}}}]}}}}\n'
+      ;;
+    *'"method":"tools/call"'*)
+      if echo "$line" | grep -q '"arch":"invalid"'; then
+        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid arch"}}}}\n'
+      elif echo "$line" | grep -q '"arguments":{{}}'; then
+        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"Defaults updated"}}],"isError":false}}}}\n'
+      else
+        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"unexpected arguments"}}}}\n'
       fi
       ;;
   esac

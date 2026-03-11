@@ -326,39 +326,45 @@ fn run_happy_probe(
                 return baseline;
             }
 
-            let retryable_not_found = baseline.error_kind == Some(ProbeErrorKind::McpError)
-                && baseline
+            let mut final_result = baseline;
+            let retryable_not_found = final_result.error_kind == Some(ProbeErrorKind::McpError)
+                && final_result
                     .response_preview
                     .as_deref()
                     .unwrap_or_default()
                     .to_ascii_lowercase()
                     .contains("not found");
-            if !retryable_not_found {
-                return baseline;
+            if retryable_not_found {
+                let setup_calls = derive_setup_calls(runtime_tools, original_tool_name, &args);
+                if !setup_calls.is_empty() {
+                    let retried = execute_probe_expect_success(
+                        server,
+                        tool_name,
+                        "happy-path",
+                        args,
+                        source,
+                        options,
+                        false,
+                        &setup_calls,
+                    );
+                    if retried.passed {
+                        return ContractProbeResult {
+                            details: format!(
+                                "{} (after deterministic setup prelude).",
+                                retried.details
+                            ),
+                            ..retried
+                        };
+                    }
+                    final_result = retried;
+                }
             }
 
-            let setup_calls = derive_setup_calls(runtime_tools, original_tool_name, &args);
-            if setup_calls.is_empty() {
-                return baseline;
+            if let Some(accepted) = accept_synthesized_prerequisite_error(&final_result, source) {
+                return accepted;
             }
 
-            let retried = execute_probe_expect_success(
-                server,
-                tool_name,
-                "happy-path",
-                args,
-                source,
-                options,
-                false,
-                &setup_calls,
-            );
-            if retried.passed {
-                return ContractProbeResult {
-                    details: format!("{} (after deterministic setup prelude).", retried.details),
-                    ..retried
-                };
-            }
-            baseline
+            final_result
         }
         Err(err) => probe_failure_result("happy-path", false, None, err),
     }
@@ -389,13 +395,13 @@ fn run_side_effect_probe(
     happy_probe_args: &std::result::Result<(Value, ProbeInputSource), ProbeFailure>,
     options: ContractTestOptions,
 ) -> ContractProbeResult {
-    if !is_likely_side_effect_tool(server, tool, runtime_tool) {
+    if !requires_side_effect_safety_probe(server, tool, runtime_tool) {
         return ContractProbeResult {
             probe: "side-effect-safety".to_string(),
             passed: true,
             skipped: true,
             executed: false,
-            details: "Tool classified as read-only/unknown; side-effect probe safely skipped."
+            details: "Tool classified as non-destructive; side-effect probe safely skipped."
                 .to_string(),
             request_args_preview: None,
             response_preview: None,
@@ -738,7 +744,77 @@ fn collect_entity_names_recursive(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-fn is_likely_side_effect_tool(
+fn accept_synthesized_prerequisite_error(
+    result: &ContractProbeResult,
+    source: ProbeInputSource,
+) -> Option<ContractProbeResult> {
+    if source != ProbeInputSource::Synthesized
+        || result.error_kind != Some(ProbeErrorKind::McpError)
+        || !looks_like_external_prerequisite_error(
+            &result.details,
+            result.response_preview.as_deref().unwrap_or_default(),
+        )
+    {
+        return None;
+    }
+
+    Some(ContractProbeResult {
+        passed: true,
+        details: "Probe reached an external prerequisite with synthesized inputs; treating the tool contract as satisfied for this context boundary.".to_string(),
+        error_kind: None,
+        ..result.clone()
+    })
+}
+
+fn looks_like_external_prerequisite_error(details: &str, response_preview: &str) -> bool {
+    let text = format!("{details} {response_preview}").to_ascii_lowercase();
+
+    const RESOURCE_MISSING_SIGNALS: &[&str] = &[
+        "file not found",
+        "not found",
+        "no such file or directory",
+        "enoent",
+        "directory not found",
+        "path does not exist",
+    ];
+    if RESOURCE_MISSING_SIGNALS
+        .iter()
+        .any(|signal| text.contains(signal))
+    {
+        return true;
+    }
+
+    const PREREQUISITE_SIGNALS: &[&str] = &[
+        "missing required",
+        "is required",
+        "provide ",
+        "set with:",
+        "not configured",
+        "required before",
+    ];
+    const CONTEXT_TERMS: &[&str] = &[
+        "session default",
+        "simulator",
+        "device",
+        "scheme",
+        "project",
+        "workspace",
+        "profile",
+        "bundle id",
+        "bundleid",
+        "xcresult",
+        "app path",
+        "apppath",
+        "deriveddata",
+    ];
+
+    PREREQUISITE_SIGNALS
+        .iter()
+        .any(|signal| text.contains(signal))
+        && CONTEXT_TERMS.iter().any(|term| text.contains(term))
+}
+
+fn requires_side_effect_safety_probe(
     server: &MCPServerProfile,
     tool: &ToolDossier,
     runtime_tool: &RuntimeTool,
@@ -750,6 +826,38 @@ fn is_likely_side_effect_tool(
         return false;
     }
 
+    let text = tool_text(tool, runtime_tool);
+    let tokens = tool_text_tokens(tool, runtime_tool);
+
+    const DESTRUCTIVE: &[&str] = &[
+        "create",
+        "delete",
+        "remove",
+        "uninstall",
+        "destroy",
+        "drop",
+        "truncate",
+        "purge",
+        "wipe",
+        "erase",
+        "terminate",
+        "shutdown",
+    ];
+
+    let destructive =
+        DESTRUCTIVE.iter().any(|token| tokens.contains(*token)) || text.contains("rm -rf");
+    if destructive {
+        return true;
+    }
+
+    match server.inferred_permission {
+        PermissionLevel::Destructive => true,
+        PermissionLevel::Write => false,
+        PermissionLevel::ReadOnly | PermissionLevel::Unknown => false,
+    }
+}
+
+fn tool_text(tool: &ToolDossier, runtime_tool: &RuntimeTool) -> String {
     let mut text = tool.name.to_ascii_lowercase();
     text.push(' ');
     text.push_str(&tool.explanation.to_ascii_lowercase());
@@ -757,52 +865,17 @@ fn is_likely_side_effect_tool(
         text.push(' ');
         text.push_str(&description.to_ascii_lowercase());
     }
+    text
+}
 
-    const MUTATING: &[&str] = &[
-        "create",
-        "update",
-        "delete",
-        "remove",
-        "write",
-        "set",
-        "apply",
-        "install",
-        "uninstall",
-        "push",
-        "commit",
-        "merge",
-        "stop",
-        "start",
-        "run",
-        "execute",
-        "launch",
-    ];
-    const READ_ONLY: &[&str] = &[
-        "list",
-        "get",
-        "read",
-        "fetch",
-        "query",
-        "search",
-        "find",
-        "inspect",
-        "show",
-        "status",
-        "snapshot",
-        "screenshot",
-    ];
-
-    let mutating = MUTATING.iter().any(|token| text.contains(token));
-    let read_only = READ_ONLY.iter().any(|token| text.contains(token));
-    if mutating {
-        return true;
-    }
-
-    match server.inferred_permission {
-        PermissionLevel::Destructive => true,
-        PermissionLevel::Write => !read_only,
-        PermissionLevel::ReadOnly | PermissionLevel::Unknown => false,
-    }
+fn tool_text_tokens(tool: &ToolDossier, runtime_tool: &RuntimeTool) -> BTreeSet<String> {
+    tool_text(tool, runtime_tool)
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .flat_map(|segment| segment.split('_'))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn has_non_mutating_guard(args: &Value) -> bool {

@@ -10,9 +10,9 @@ use crate::skillset::{
     write_skill_manifest,
 };
 use crate::{
-    ApplyOptions, ApplyResultV3, ApplyServerResult, ContractTestOptions, ConvertApplyResult,
-    ConvertV3Options, DossierBundle, EnrichmentAgent, ManifestToolSkill, OneShotV3Result, PlanMode,
-    ServerGate, SkillParityManifest,
+    ApplyOptions, ApplyResultV3, ApplyServerResult, ContractTestOptions, ContractTestReport,
+    ConvertApplyResult, ConvertV3Options, DossierBundle, EnrichmentAgent, ManifestToolSkill,
+    OneShotV3Result, PlanMode, ServerGate, SkillParityManifest,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -274,7 +274,7 @@ pub fn run_one_shot_v3(
             "Conversion blocked: contract tests failed. Run 'mcpsmith contract-test --from-dossier ...' for details."
         );
     }
-    let apply = apply_from_bundle(&bundle, true, skills_dir, contract_options)?;
+    let apply = apply_from_prevalidated_bundle(&bundle, true, skills_dir, &contract)?;
     Ok(OneShotV3Result {
         generated_at: Utc::now(),
         dossier: bundle,
@@ -289,6 +289,25 @@ pub fn apply_from_bundle(
     skills_dir: Option<PathBuf>,
     contract_options: ContractTestOptions,
 ) -> Result<ApplyResultV3> {
+    apply_from_bundle_inner(bundle, yes, skills_dir, Some(contract_options), None)
+}
+
+fn apply_from_prevalidated_bundle(
+    bundle: &DossierBundle,
+    yes: bool,
+    skills_dir: Option<PathBuf>,
+    contract: &ContractTestReport,
+) -> Result<ApplyResultV3> {
+    apply_from_bundle_inner(bundle, yes, skills_dir, None, Some(contract))
+}
+
+fn apply_from_bundle_inner(
+    bundle: &DossierBundle,
+    yes: bool,
+    skills_dir: Option<PathBuf>,
+    contract_options: Option<ContractTestOptions>,
+    prevalidated_contract: Option<&ContractTestReport>,
+) -> Result<ApplyResultV3> {
     if !yes {
         bail!("apply requires --yes because it mutates MCP config entries.");
     }
@@ -297,8 +316,14 @@ pub fn apply_from_bundle(
         bail!("No dossiers found to apply.");
     }
 
-    let contract = contract_test_bundle(bundle, contract_options)?;
-    if !contract.passed {
+    let passed = if let Some(contract) = prevalidated_contract {
+        contract.passed
+    } else {
+        let options = contract_options
+            .expect("contract options required when no prevalidated contract is provided");
+        contract_test_bundle(bundle, options)?.passed
+    };
+    if !passed {
         bail!(
             "Conversion blocked: one or more contract tests failed. No files were applied or MCP configs mutated."
         );

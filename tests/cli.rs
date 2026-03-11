@@ -3,9 +3,10 @@ mod support;
 use predicates::prelude::*;
 use std::path::Path;
 use support::{
-    TestContext, count_backups, write_mock_claude_script, write_mock_codex_script,
-    write_mock_codex_script_for, write_mock_mcp_id_schema_script, write_mock_mcp_no_schema_script,
-    write_mock_mcp_script,
+    TestContext, count_backups, write_counting_mock_mcp_script, write_mock_claude_script,
+    write_mock_codex_script, write_mock_codex_script_for, write_mock_mcp_context_error_script,
+    write_mock_mcp_id_schema_script, write_mock_mcp_no_schema_script, write_mock_mcp_script,
+    write_mock_mcp_session_defaults_script,
 };
 
 fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<bool>) {
@@ -397,6 +398,35 @@ fn test_mcpsmith_one_shot_works_with_claude_only() {
 }
 
 #[test]
+fn test_mcpsmith_one_shot_reuses_initial_contract_gate() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let skills_dir = ctx.skills_dir();
+    let mock_mcp = ctx.path("mock-mcp-counting.sh");
+    let mock_codex = ctx.path("mock-codex.sh");
+    let spawn_log = ctx.path("mock-mcp-spawns.log");
+    write_counting_mock_mcp_script(&mock_mcp, &spawn_log, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["playwright", "--json", "--config"])
+        .arg(&config_path)
+        .args(["--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
+
+    let spawn_count = std::fs::read_to_string(&spawn_log).unwrap().lines().count();
+    assert_eq!(
+        spawn_count, 6,
+        "one-shot should avoid rerunning the full contract gate during apply"
+    );
+}
+
+#[test]
 fn test_mcpsmith_discover_fails_cleanly_when_no_backend_installed() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
@@ -444,6 +474,77 @@ fn test_mcpsmith_contract_test_blocks_on_schema_gap() {
         .success()
         .stdout(predicate::str::contains("\"passed\": false"))
         .stdout(predicate::str::contains("\"error_kind\": \"schema-gap\""));
+}
+
+#[test]
+fn test_mcpsmith_contract_test_accepts_synthesized_context_prereq_errors() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let dossier_path = ctx.dossier_path();
+    let mock_mcp = ctx.path("mock-mcp-context.sh");
+    let mock_codex = ctx.path("mock-codex.sh");
+    write_mock_mcp_context_error_script(&mock_mcp, "discover_projs");
+    write_mock_codex_script_for(&mock_codex, &["discover_projs"]);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["discover", "playwright", "--out"])
+        .arg(&dossier_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    ctx.cmd()
+        .args(["contract-test", "--from-dossier"])
+        .arg(&dossier_path)
+        .args(["--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"))
+        .stdout(predicate::str::contains("external prerequisite"))
+        .stdout(predicate::str::contains("\"tool\": \"discover_projs\""));
+}
+
+#[test]
+fn test_mcpsmith_contract_test_skips_side_effect_safety_for_session_tools() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let dossier_path = ctx.dossier_path();
+    let mock_mcp = ctx.path("mock-mcp-session-defaults.sh");
+    let mock_codex = ctx.path("mock-codex.sh");
+    write_mock_mcp_session_defaults_script(&mock_mcp, "session_set_defaults");
+    write_mock_codex_script_for(&mock_codex, &["session_set_defaults"]);
+    ctx.write_server_config(
+        "xcodebuildmcp",
+        &mock_mcp,
+        Some("Xcode simulator helpers"),
+        None,
+    );
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["discover", "xcodebuildmcp", "--out"])
+        .arg(&dossier_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    ctx.cmd()
+        .args(["contract-test", "--from-dossier"])
+        .arg(&dossier_path)
+        .args(["--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"))
+        .stdout(predicate::str::contains(
+            "Tool classified as non-destructive; side-effect probe safely skipped.",
+        ))
+        .stdout(predicate::str::contains(
+            "\"tool\": \"session_set_defaults\"",
+        ));
 }
 
 #[test]
