@@ -2,11 +2,12 @@ mod support;
 
 use predicates::prelude::*;
 use std::path::Path;
+use std::time::Duration;
 use support::{
-    TestContext, count_backups, write_counting_mock_mcp_script, write_mock_claude_script,
-    write_mock_codex_script, write_mock_codex_script_for, write_mock_mcp_context_error_script,
-    write_mock_mcp_id_schema_script, write_mock_mcp_no_schema_script, write_mock_mcp_script,
-    write_mock_mcp_session_defaults_script,
+    TestContext, count_backups, write_counting_mock_mcp_script, write_leaking_mock_mcp_script,
+    write_mock_claude_script, write_mock_codex_script, write_mock_codex_script_for,
+    write_mock_mcp_context_error_script, write_mock_mcp_id_schema_script,
+    write_mock_mcp_no_schema_script, write_mock_mcp_script, write_mock_mcp_session_defaults_script,
 };
 
 fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<bool>) {
@@ -574,4 +575,54 @@ fn test_mcpsmith_contract_test_allows_side_effect_probe_with_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"passed\": true"));
+}
+
+#[test]
+fn test_mcpsmith_contract_test_reaps_descendant_mcp_processes() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let dossier_path = ctx.dossier_path();
+    let pid_log = ctx.path("leaked-mcp-pids.log");
+    std::fs::write(&pid_log, "").unwrap();
+    let mock_mcp = ctx.path("mock-mcp-leaking.sh");
+    let mock_codex = ctx.path("mock-codex.sh");
+    write_leaking_mock_mcp_script(&mock_mcp, &pid_log, &["execute"]);
+    write_mock_codex_script_for(&mock_codex, &["execute"]);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["discover", "playwright", "--out"])
+        .arg(&dossier_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    ctx.cmd()
+        .args(["contract-test", "--from-dossier"])
+        .arg(&dossier_path)
+        .args(["--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"));
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    let pid_text = std::fs::read_to_string(&pid_log).unwrap();
+    let leaked = pid_text
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .any(|pid| {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 {pid}")])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        });
+
+    assert!(
+        !leaked,
+        "contract-test should reap descendant MCP processes before returning"
+    );
 }

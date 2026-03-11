@@ -318,6 +318,45 @@ done
     write_agent_script(path, &body);
 }
 
+pub fn write_leaking_mock_mcp_script(path: &Path, pid_path: &Path, tool_names: &[&str]) {
+    let tools = tool_names
+        .iter()
+        .map(|name| {
+            format!(
+                r#"{{\"name\":\"{name}\",\"description\":\"Tool {name}\",\"inputSchema\":{{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{{\"query\":{{\"type\":\"string\"}}}}}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let pid_path = pid_path.to_string_lossy();
+    let body = format!(
+        r#"#!/bin/sh
+spawn_child() {{
+  sh -c 'printf "%s\n" "$$" >> '"'"'{pid_path}'"'"'; sleep 30' >/dev/null 2>&1 &
+}}
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{tools}]}}}}\n'
+      ;;
+    *'"method":"tools/call"'*)
+      spawn_child
+      if echo "$line" | grep -q '"query":"'; then
+        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
+      else
+        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid query"}}}}\n'
+      fi
+      ;;
+  esac
+done
+"#
+    );
+    write_agent_script(path, &body);
+}
+
 fn write_server_config(
     path: &Path,
     server_name: &str,

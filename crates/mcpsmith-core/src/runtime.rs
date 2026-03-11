@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -169,7 +171,9 @@ fn execute_mcp_tool_probe_once(
         response_preview: None,
     })?;
 
-    let mut child = Command::new(command)
+    let mut command_builder = Command::new(command);
+    configure_spawned_process(&mut command_builder);
+    let child = command_builder
         .args(&server.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -180,18 +184,19 @@ fn execute_mcp_tool_probe_once(
             message: format!("Failed to spawn MCP command '{command}': {err}"),
             response_preview: None,
         })?;
+    let mut child = SpawnedChild::new(child);
 
-    let mut stdin = child.stdin.take().ok_or_else(|| ProbeFailure {
+    let mut stdin = child.take_stdin().ok_or_else(|| ProbeFailure {
         kind: ProbeErrorKind::Transport,
         message: "Failed to open MCP stdin.".to_string(),
         response_preview: None,
     })?;
-    let stdout = child.stdout.take().ok_or_else(|| ProbeFailure {
+    let stdout = child.take_stdout().ok_or_else(|| ProbeFailure {
         kind: ProbeErrorKind::Transport,
         message: "Failed to open MCP stdout.".to_string(),
         response_preview: None,
     })?;
-    let _stderr = child.stderr.take().ok_or_else(|| ProbeFailure {
+    let _stderr = child.take_stderr().ok_or_else(|| ProbeFailure {
         kind: ProbeErrorKind::Transport,
         message: "Failed to open MCP stderr.".to_string(),
         response_preview: None,
@@ -234,124 +239,122 @@ fn execute_mcp_tool_probe_once(
     })?;
     let _ = wait_for_jsonrpc_response(1, &rx, &mut buffered, deadline);
 
-    let mut next_setup_id = 100_i64;
-    for (setup_tool, setup_args) in setup_calls {
-        let setup_id = next_setup_id;
-        next_setup_id += 1;
-        let setup_call = serde_json::json!({
+    let result = (|| -> std::result::Result<McpToolCallOutcome, ProbeFailure> {
+        let mut next_setup_id = 100_i64;
+        for (setup_tool, setup_args) in setup_calls {
+            let setup_id = next_setup_id;
+            next_setup_id += 1;
+            let setup_call = serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":setup_id,
+                "method":"tools/call",
+                "params":{"name":setup_tool,"arguments":setup_args}
+            });
+            writeln!(stdin, "{setup_call}").map_err(|err| ProbeFailure {
+                kind: ProbeErrorKind::Transport,
+                message: format!(
+                    "Failed to write setup tools/call for '{}': {err}",
+                    setup_tool
+                ),
+                response_preview: None,
+            })?;
+            let setup_response = wait_for_jsonrpc_response(setup_id, &rx, &mut buffered, deadline)
+                .map_err(|mut err| {
+                    err.message = format!(
+                        "Setup call '{}' failed before '{}' execution: {}",
+                        setup_tool, tool_name, err.message
+                    );
+                    err
+                })?;
+            if setup_response.get("error").is_some()
+                || setup_response
+                    .get("result")
+                    .and_then(|v| v.get("isError"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                || setup_response
+                    .get("result")
+                    .and_then(|v| v.get("is_error"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                return Err(ProbeFailure {
+                    kind: ProbeErrorKind::McpError,
+                    message: format!(
+                        "Setup probe call for tool '{}' failed before '{}' execution.",
+                        setup_tool, tool_name
+                    ),
+                    response_preview: Some(clipped_preview(
+                        &value_to_compact_json(&setup_response),
+                        260,
+                    )),
+                });
+            }
+        }
+
+        let target_call_id = 2_i64;
+        let call = serde_json::json!({
             "jsonrpc":"2.0",
-            "id":setup_id,
+            "id":target_call_id,
             "method":"tools/call",
-            "params":{"name":setup_tool,"arguments":setup_args}
+            "params":{"name":tool_name,"arguments":args}
         });
-        writeln!(stdin, "{setup_call}").map_err(|err| ProbeFailure {
+        writeln!(stdin, "{call}").map_err(|err| ProbeFailure {
             kind: ProbeErrorKind::Transport,
-            message: format!(
-                "Failed to write setup tools/call for '{}': {err}",
-                setup_tool
-            ),
+            message: format!("Failed to write MCP tools/call request: {err}"),
             response_preview: None,
         })?;
-        let setup_response = wait_for_jsonrpc_response(setup_id, &rx, &mut buffered, deadline)
-            .map_err(|mut err| {
-                err.message = format!(
-                    "Setup call '{}' failed before '{}' execution: {}",
-                    setup_tool, tool_name, err.message
-                );
-                err
-            })?;
-        if setup_response.get("error").is_some()
-            || setup_response
-                .get("result")
-                .and_then(|v| v.get("isError"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            || setup_response
-                .get("result")
-                .and_then(|v| v.get("is_error"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            drop(stdin);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ProbeFailure {
-                kind: ProbeErrorKind::McpError,
-                message: format!(
-                    "Setup probe call for tool '{}' failed before '{}' execution.",
-                    setup_tool, tool_name
+        let response = wait_for_jsonrpc_response(target_call_id, &rx, &mut buffered, deadline)?;
+
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let response_preview = clipped_preview(&value_to_compact_json(&response), 260);
+        if let Some(error) = response.get("error") {
+            return Ok(McpToolCallOutcome {
+                is_error: true,
+                details: format!(
+                    "JSON-RPC error: {}",
+                    clipped_preview(&value_to_compact_json(error), 180)
                 ),
-                response_preview: Some(clipped_preview(
-                    &value_to_compact_json(&setup_response),
-                    260,
-                )),
+                response_preview,
+                duration_ms,
             });
         }
-    }
 
-    let target_call_id = 2_i64;
-    let call = serde_json::json!({
-        "jsonrpc":"2.0",
-        "id":target_call_id,
-        "method":"tools/call",
-        "params":{"name":tool_name,"arguments":args}
-    });
-    writeln!(stdin, "{call}").map_err(|err| ProbeFailure {
-        kind: ProbeErrorKind::Transport,
-        message: format!("Failed to write MCP tools/call request: {err}"),
-        response_preview: None,
-    })?;
-    let response = wait_for_jsonrpc_response(target_call_id, &rx, &mut buffered, deadline)?;
+        let Some(result) = response.get("result") else {
+            return Err(ProbeFailure {
+                kind: ProbeErrorKind::Transport,
+                message: "MCP response missing `result` payload for tools/call.".to_string(),
+                response_preview: Some(response_preview),
+            });
+        };
+
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || result
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let details = if is_error {
+            "Tool returned result.isError=true".to_string()
+        } else {
+            "Tool returned success result.".to_string()
+        };
+
+        Ok(McpToolCallOutcome {
+            is_error,
+            details,
+            response_preview,
+            duration_ms,
+        })
+    })();
 
     drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
     // Some MCP servers spawn descendants that inherit stdout. Joining the
     // reader thread can then block even after the direct child has exited.
     drop(reader_handle);
-    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-    let response_preview = clipped_preview(&value_to_compact_json(&response), 260);
-    if let Some(error) = response.get("error") {
-        return Ok(McpToolCallOutcome {
-            is_error: true,
-            details: format!(
-                "JSON-RPC error: {}",
-                clipped_preview(&value_to_compact_json(error), 180)
-            ),
-            response_preview,
-            duration_ms,
-        });
-    }
-
-    let Some(result) = response.get("result") else {
-        return Err(ProbeFailure {
-            kind: ProbeErrorKind::Transport,
-            message: "MCP response missing `result` payload for tools/call.".to_string(),
-            response_preview: Some(response_preview),
-        });
-    };
-
-    let is_error = result
-        .get("isError")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || result
-            .get("is_error")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-    let details = if is_error {
-        "Tool returned result.isError=true".to_string()
-    } else {
-        "Tool returned success result.".to_string()
-    };
-
-    Ok(McpToolCallOutcome {
-        is_error,
-        details,
-        response_preview,
-        duration_ms,
-    })
+    result
 }
 
 fn wait_for_jsonrpc_response(
@@ -404,4 +407,52 @@ fn wait_for_jsonrpc_response(
 
 pub(crate) fn value_to_compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<non-serializable>".to_string())
+}
+
+fn configure_spawned_process(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+}
+
+struct SpawnedChild {
+    child: Option<Child>,
+}
+
+impl SpawnedChild {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.as_mut()?.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut()?.stdout.take()
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut()?.stderr.take()
+    }
+}
+
+impl Drop for SpawnedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate_process_tree(&mut child);
+        }
+    }
+}
+
+fn terminate_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::killpg(child.id() as i32, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
