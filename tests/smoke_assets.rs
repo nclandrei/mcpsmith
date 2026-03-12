@@ -1,4 +1,4 @@
-use mcpsmith_core::DossierBundle;
+use mcpsmith_core::ReviewReport;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn load_live_fixture(path: &str) -> DossierBundle {
+fn load_live_fixture(path: &str) -> ReviewReport {
     let fixture_path = repo_root().join(path);
     let body = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
         panic!("failed to read {}: {err}", fixture_path.display());
@@ -22,57 +22,43 @@ fn load_live_fixture(path: &str) -> DossierBundle {
 }
 
 fn assert_live_fixture(path: &str, expected_tool: &str) {
-    let bundle = load_live_fixture(path);
+    let report = load_live_fixture(path);
+    assert!(report.approved, "{path} should be approved");
     assert_eq!(
-        bundle.dossiers.len(),
+        report.bundle.tool_conversions.len(),
         1,
-        "{path} should contain one dossier"
+        "{path} should contain one reviewed tool draft"
     );
 
-    let dossier = &bundle.dossiers[0];
-    assert_eq!(
-        dossier.runtime_validations.len(),
-        1,
-        "{path} should contain one runtime validation"
-    );
+    let draft = &report.bundle.tool_conversions[0];
+    assert_eq!(draft.tool_name, expected_tool);
     assert!(
-        dossier.runtime_validations[0]
-            .probe_inputs
-            .happy_path
-            .is_some(),
-        "{path} is missing explicit happy-path probe input"
-    );
-    assert_eq!(dossier.runtime_validations[0].tool_name, expected_tool);
-    assert_eq!(
-        dossier.workflow_skills.len(),
-        1,
-        "{path} should contain one workflow"
-    );
-    assert!(
-        dossier.workflow_skills[0]
+        draft
+            .workflow_skill
             .origin_tools
             .iter()
             .any(|tool| tool == expected_tool),
         "{path} should wire the expected runtime tool into the workflow"
     );
     assert!(
-        Path::new(&dossier.server.source_path).ends_with("dummy-config.json"),
+        !draft.semantic_summary.citations.is_empty(),
+        "{path} should include grounded citations"
+    );
+    assert!(
+        Path::new(&report.bundle.evidence.server.source_path).ends_with("dummy-config.json"),
         "{path} should hydrate source_path placeholder"
     );
 }
 
 #[test]
 fn live_smoke_fixtures_deserialize_with_explicit_happy_path_inputs() {
+    assert_live_fixture("tests/fixtures/live/memory-smoke.review.json", "read_graph");
     assert_live_fixture(
-        "tests/fixtures/live/memory-smoke.dossier.json",
-        "read_graph",
-    );
-    assert_live_fixture(
-        "tests/fixtures/live/chrome-devtools-smoke.dossier.json",
+        "tests/fixtures/live/chrome-devtools-smoke.review.json",
         "list_pages",
     );
     assert_live_fixture(
-        "tests/fixtures/live/xcodebuildmcp-smoke.dossier.json",
+        "tests/fixtures/live/xcodebuildmcp-smoke.review.json",
         "screenshot",
     );
 }

@@ -163,8 +163,8 @@ One-shot runs also emit a run report with paths for `resolve`, `snapshot`,
 Sample fixtures live under [`examples/`](examples):
 
 - [`examples/sample-mcp-config.json`](examples/sample-mcp-config.json)
-- [`examples/sample-dossier.json`](examples/sample-dossier.json)
-- [`examples/sample-contract-report.json`](examples/sample-contract-report.json)
+- [`examples/sample-review.json`](examples/sample-review.json)
+- [`examples/sample-run-report.json`](examples/sample-run-report.json)
 - [`examples/sample-skill-pack-tree.txt`](examples/sample-skill-pack-tree.txt)
 
 The active follow-up plan for other agents lives in [`NEXT-STEPS.md`](NEXT-STEPS.md).
@@ -179,7 +179,7 @@ The active follow-up plan for other agents lives in [`NEXT-STEPS.md`](NEXT-STEPS
   citations or unresolved tool locations.
 - Review rejected a skill: inspect the `review` artifact and rerun synthesis
   with a better backend or better source evidence.
-- Apply blocked: use `--dry-run` first, then inspect the staged artifacts
+- One-shot blocked: use `--dry-run` first, then inspect the staged artifacts
   before rerunning one-shot without `--dry-run`.
 
 ## Isolated verification

@@ -2,7 +2,7 @@
 name = "mcpsmith-core"
 version = "0.1.0"
 edition = "2024"
-description = "Core MCP conversion planning, runtime contract testing, and apply logic for mcpsmith"
+description = "Core staged pipeline for resolving, grounding, reviewing, and installing mcpsmith conversions"
 license = "MIT"
 repository = "https://github.com/nclandrei/mcpsmith"
 homepage = "https://github.com/nclandrei/mcpsmith"

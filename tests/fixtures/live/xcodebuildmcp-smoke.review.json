@@ -1,0 +1,239 @@
+{
+  "generated_at": "2026-03-09T00:00:00Z",
+  "approved": true,
+  "bundle": {
+    "generated_at": "2026-03-09T00:00:00Z",
+    "evidence": {
+      "generated_at": "2026-03-09T00:00:00Z",
+      "server": {
+        "id": "custom-1:xcodebuildmcp",
+        "name": "xcodebuildmcp",
+        "source_label": "custom-1",
+        "source_path": "__CONFIG_PATH__",
+        "purpose": "Xcode build, simulator, and iOS debug workflows",
+        "command": "npx",
+        "args": [
+          "-y",
+          "xcodebuildmcp@latest",
+          "mcp"
+        ],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": [],
+        "inferred_permission": "write",
+        "recommendation": "hybrid",
+        "recommendation_reason": "Simulator and project actions stay hybrid in live smoke.",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false,
+          "package_name": "xcodebuildmcp"
+        }
+      },
+      "artifact": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "server": {
+          "id": "custom-1:xcodebuildmcp",
+          "name": "xcodebuildmcp",
+          "source_label": "custom-1",
+          "source_path": "__CONFIG_PATH__",
+          "purpose": "Xcode build, simulator, and iOS debug workflows",
+          "command": "npx",
+          "args": [
+            "-y",
+            "xcodebuildmcp@latest",
+            "mcp"
+          ],
+          "url": null,
+          "env_keys": [],
+          "declared_tool_count": 1,
+          "permission_hints": [],
+          "inferred_permission": "write",
+          "recommendation": "hybrid",
+          "recommendation_reason": "Simulator and project actions stay hybrid in live smoke.",
+          "source_grounding": {
+            "kind": "npm-package",
+            "evidence_level": "config-only",
+            "inspected": false,
+            "package_name": "xcodebuildmcp"
+          }
+        },
+        "kind": "npm-package",
+        "identity": {
+          "value": "xcodebuildmcp",
+          "version": "1.0.0"
+        },
+        "blocked": false
+      },
+      "snapshot": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "artifact": {
+          "generated_at": "2026-03-09T00:00:00Z",
+          "server": {
+            "id": "custom-1:xcodebuildmcp",
+            "name": "xcodebuildmcp",
+            "source_label": "custom-1",
+            "source_path": "__CONFIG_PATH__",
+            "purpose": "Xcode build, simulator, and iOS debug workflows",
+            "command": "npx",
+            "args": [
+              "-y",
+              "xcodebuildmcp@latest",
+              "mcp"
+            ],
+            "url": null,
+            "env_keys": [],
+            "declared_tool_count": 1,
+            "permission_hints": [],
+            "inferred_permission": "write",
+            "recommendation": "hybrid",
+            "recommendation_reason": "Simulator and project actions stay hybrid in live smoke.",
+            "source_grounding": {
+              "kind": "npm-package",
+              "evidence_level": "config-only",
+              "inspected": false,
+              "package_name": "xcodebuildmcp"
+            }
+          },
+          "kind": "npm-package",
+          "identity": {
+            "value": "xcodebuildmcp",
+            "version": "1.0.0"
+          },
+          "blocked": false
+        },
+        "cache_root": "/tmp/mcpsmith/cache/xcodebuildmcp",
+        "source_root": "/tmp/mcpsmith/cache/xcodebuildmcp/source",
+        "reused_cache": false,
+        "manifest_paths": [
+          "/tmp/mcpsmith/cache/xcodebuildmcp/source/package.json"
+        ]
+      },
+      "runtime_tools": [
+        {
+          "name": "screenshot",
+          "description": "Capture a simulator screenshot.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "returnFormat": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "tool_evidence": [
+        {
+          "tool_name": "screenshot",
+          "runtime_tool": {
+            "name": "screenshot",
+            "description": "Capture a simulator screenshot.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "returnFormat": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "registration": {
+            "file_path": "src/index.ts",
+            "start_line": 15,
+            "end_line": 26,
+            "excerpt": "server.tool('screenshot', ...)",
+            "score": 0.94
+          },
+          "handler": {
+            "file_path": "src/screenshot.ts",
+            "start_line": 28,
+            "end_line": 54,
+            "excerpt": "export async function screenshot() {}",
+            "score": 0.92
+          },
+          "required_inputs": [
+            "returnFormat"
+          ],
+          "confidence": 0.9
+        }
+      ]
+    },
+    "backend_used": "fixture",
+    "backend_fallback_used": false,
+    "tool_conversions": [
+      {
+        "tool_name": "screenshot",
+        "semantic_summary": {
+          "what_it_does": "Captures the active iOS simulator screen and returns an artifact path.",
+          "required_inputs": [
+            "output_path"
+          ],
+          "prerequisites": [],
+          "side_effect_level": "write",
+          "success_signals": [
+            "PNG file created"
+          ],
+          "failure_modes": [
+            "No booted simulator"
+          ],
+          "citations": [
+            "docs/screenshot.md"
+          ],
+          "confidence": 0.9
+        },
+        "workflow_skill": {
+          "id": "capture-ios-simulator-screenshot",
+          "title": "Capture iOS simulator screenshot",
+          "goal": "Capture the current iOS simulator screen with native Xcode tools.",
+          "when_to_use": "Use this when you need a PNG screenshot from the active iOS simulator.",
+          "trigger_phrases": [
+            "take simulator screenshot",
+            "capture ios screenshot"
+          ],
+          "origin_tools": [
+            "screenshot"
+          ],
+          "required_context": [
+            {
+              "name": "output_path",
+              "guidance": "Choose the output PNG path before running the command.",
+              "required": true
+            }
+          ],
+          "context_acquisition": [
+            "Ask for the output path if the workflow has not already established one."
+          ],
+          "branching_rules": [
+            "If no simulator is booted yet, boot the target simulator before running the screenshot command."
+          ],
+          "stop_and_ask": [
+            "Stop if no simulator is booted or the target screen is unknown."
+          ],
+          "native_steps": [
+            {
+              "title": "Capture the active simulator screen",
+              "command": "OUTPUT_PATH=\"${TMPDIR:-/tmp}/mcpsmith-simulator.png\"\nxcrun simctl io booted screenshot \"$OUTPUT_PATH\"",
+              "details": "Replace the sample OUTPUT_PATH if the user asked for a specific artifact location, and make sure the intended screen is visible before running the command."
+            }
+          ],
+          "verification": [
+            "Confirm the PNG file exists at the chosen output path."
+          ],
+          "return_contract": [
+            "Return the screenshot path and a short note describing what screen was captured."
+          ],
+          "guardrails": [
+            "Do not overwrite an unrelated screenshot path without confirming it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
+        }
+      }
+    ]
+  },
+  "findings": []
+}

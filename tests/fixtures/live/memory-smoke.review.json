@@ -1,0 +1,217 @@
+{
+  "generated_at": "2026-03-09T00:00:00Z",
+  "approved": true,
+  "bundle": {
+    "generated_at": "2026-03-09T00:00:00Z",
+    "evidence": {
+      "generated_at": "2026-03-09T00:00:00Z",
+      "server": {
+        "id": "custom-1:memory",
+        "name": "memory",
+        "source_label": "custom-1",
+        "source_path": "__CONFIG_PATH__",
+        "purpose": "Memory and knowledge graph workflows",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-memory"
+        ],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": [
+          "read-only"
+        ],
+        "inferred_permission": "read-only",
+        "recommendation": "replace-candidate",
+        "recommendation_reason": "Read-only live smoke fixture.",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false,
+          "package_name": "@modelcontextprotocol/server-memory"
+        }
+      },
+      "artifact": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "server": {
+          "id": "custom-1:memory",
+          "name": "memory",
+          "source_label": "custom-1",
+          "source_path": "__CONFIG_PATH__",
+          "purpose": "Memory and knowledge graph workflows",
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-memory"
+          ],
+          "url": null,
+          "env_keys": [],
+          "declared_tool_count": 1,
+          "permission_hints": [
+            "read-only"
+          ],
+          "inferred_permission": "read-only",
+          "recommendation": "replace-candidate",
+          "recommendation_reason": "Read-only live smoke fixture.",
+          "source_grounding": {
+            "kind": "npm-package",
+            "evidence_level": "config-only",
+            "inspected": false,
+            "package_name": "@modelcontextprotocol/server-memory"
+          }
+        },
+        "kind": "npm-package",
+        "identity": {
+          "value": "@modelcontextprotocol/server-memory",
+          "version": "1.0.0"
+        },
+        "blocked": false
+      },
+      "snapshot": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "artifact": {
+          "generated_at": "2026-03-09T00:00:00Z",
+          "server": {
+            "id": "custom-1:memory",
+            "name": "memory",
+            "source_label": "custom-1",
+            "source_path": "__CONFIG_PATH__",
+            "purpose": "Memory and knowledge graph workflows",
+            "command": "npx",
+            "args": [
+              "-y",
+              "@modelcontextprotocol/server-memory"
+            ],
+            "url": null,
+            "env_keys": [],
+            "declared_tool_count": 1,
+            "permission_hints": [
+              "read-only"
+            ],
+            "inferred_permission": "read-only",
+            "recommendation": "replace-candidate",
+            "recommendation_reason": "Read-only live smoke fixture.",
+            "source_grounding": {
+              "kind": "npm-package",
+              "evidence_level": "config-only",
+              "inspected": false,
+              "package_name": "@modelcontextprotocol/server-memory"
+            }
+          },
+          "kind": "npm-package",
+          "identity": {
+            "value": "@modelcontextprotocol/server-memory",
+            "version": "1.0.0"
+          },
+          "blocked": false
+        },
+        "cache_root": "/tmp/mcpsmith/cache/server-memory",
+        "source_root": "/tmp/mcpsmith/cache/server-memory/source",
+        "reused_cache": false,
+        "manifest_paths": [
+          "/tmp/mcpsmith/cache/server-memory/source/package.json"
+        ]
+      },
+      "runtime_tools": [
+        {
+          "name": "read_graph",
+          "description": "Read the entire knowledge graph",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tool_evidence": [
+        {
+          "tool_name": "read_graph",
+          "runtime_tool": {
+            "name": "read_graph",
+            "description": "Read the entire knowledge graph",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "registration": {
+            "file_path": "src/index.ts",
+            "start_line": 12,
+            "end_line": 22,
+            "excerpt": "server.tool('read_graph', ...)",
+            "score": 0.95
+          },
+          "handler": {
+            "file_path": "src/read-graph.ts",
+            "start_line": 24,
+            "end_line": 48,
+            "excerpt": "export async function readGraph() {}",
+            "score": 0.94
+          },
+          "required_inputs": [],
+          "confidence": 0.93
+        }
+      ]
+    },
+    "backend_used": "fixture",
+    "backend_fallback_used": false,
+    "tool_conversions": [
+      {
+        "tool_name": "read_graph",
+        "semantic_summary": {
+          "what_it_does": "Reads the stored graph state and returns the current contents.",
+          "required_inputs": [],
+          "prerequisites": [],
+          "side_effect_level": "read-only",
+          "success_signals": [
+            "Graph content returned"
+          ],
+          "failure_modes": [
+            "Backing store not found"
+          ],
+          "citations": [
+            "docs/read-graph.md"
+          ],
+          "confidence": 0.9
+        },
+        "workflow_skill": {
+          "id": "inspect-memory-graph",
+          "title": "Inspect memory graph",
+          "goal": "Read the local memory graph without relying on the MCP server.",
+          "when_to_use": "Use this when you need the current memory graph contents.",
+          "trigger_phrases": [
+            "read memory graph",
+            "inspect stored memory"
+          ],
+          "origin_tools": [
+            "read_graph"
+          ],
+          "stop_and_ask": [
+            "Stop if you cannot determine which local memory store should be read safely."
+          ],
+          "native_steps": [
+            {
+              "title": "Inspect the local graph store",
+              "command": "python3 - <<'PY'\nprint('inspect the configured memory graph backing store here')\nPY",
+              "details": "Replace the placeholder inspection command with the concrete local storage read path for the target environment."
+            }
+          ],
+          "verification": [
+            "Confirm the command completed successfully and returned graph content."
+          ],
+          "return_contract": [
+            "Return the graph output or file path together with the backing store you inspected."
+          ],
+          "guardrails": [
+            "Do not mutate the local memory store while inspecting it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
+        }
+      }
+    ]
+  },
+  "findings": []
+}

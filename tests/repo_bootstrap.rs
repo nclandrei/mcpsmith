@@ -20,8 +20,8 @@ fn repo_bootstrap_files_exist() {
         "README.md",
         "Makefile",
         "examples/sample-mcp-config.json",
-        "examples/sample-dossier.json",
-        "examples/sample-contract-report.json",
+        "examples/sample-review.json",
+        "examples/sample-run-report.json",
         "examples/sample-skill-pack-tree.txt",
         "scripts/local-checks.sh",
         "scripts/smoke/common.sh",
@@ -30,9 +30,9 @@ fn repo_bootstrap_files_exist() {
         "scripts/smoke/cli_verify_smoke.sh",
         ".github/workflows/ci.yml",
         ".github/workflows/live-smoke.yml",
-        "tests/fixtures/live/memory-smoke.dossier.json",
-        "tests/fixtures/live/chrome-devtools-smoke.dossier.json",
-        "tests/fixtures/live/xcodebuildmcp-smoke.dossier.json",
+        "tests/fixtures/live/memory-smoke.review.json",
+        "tests/fixtures/live/chrome-devtools-smoke.review.json",
+        "tests/fixtures/live/xcodebuildmcp-smoke.review.json",
     ] {
         assert!(repo_root().join(path).is_file(), "missing {path}");
     }
@@ -90,6 +90,22 @@ fn readme_covers_product_docs_and_examples() {
         "## Isolated verification",
     ] {
         assert!(readme.contains(needle), "README.md missing {needle}");
+    }
+
+    for needle in ["sample-review.json", "sample-run-report.json"] {
+        assert!(readme.contains(needle), "README.md missing {needle}");
+    }
+
+    for legacy in [
+        "sample-dossier.json",
+        "sample-contract-report.json",
+        "contract-test",
+        "--from-dossier",
+    ] {
+        assert!(
+            !readme.contains(legacy),
+            "README.md still references legacy flow token {legacy}"
+        );
     }
 }
 

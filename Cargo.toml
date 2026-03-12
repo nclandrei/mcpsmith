@@ -2,7 +2,7 @@
 name = "mcpsmith"
 version = "0.1.0"
 edition = "2024"
-description = "Convert MCP servers into standalone skill packs with runtime contract probes"
+description = "Convert MCP servers into source-grounded skill packs with staged review and verify steps"
 license = "MIT"
 repository = "https://github.com/nclandrei/mcpsmith"
 homepage = "https://github.com/nclandrei/mcpsmith"

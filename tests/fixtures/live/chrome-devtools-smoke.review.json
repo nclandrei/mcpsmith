@@ -1,0 +1,211 @@
+{
+  "generated_at": "2026-03-09T00:00:00Z",
+  "approved": true,
+  "bundle": {
+    "generated_at": "2026-03-09T00:00:00Z",
+    "evidence": {
+      "generated_at": "2026-03-09T00:00:00Z",
+      "server": {
+        "id": "custom-1:chrome-devtools",
+        "name": "chrome-devtools",
+        "source_label": "custom-1",
+        "source_path": "__CONFIG_PATH__",
+        "purpose": "Browser inspection and debugging workflows",
+        "command": "npx",
+        "args": [
+          "-y",
+          "chrome-devtools-mcp@latest"
+        ],
+        "url": null,
+        "env_keys": [],
+        "declared_tool_count": 1,
+        "permission_hints": [],
+        "inferred_permission": "write",
+        "recommendation": "hybrid",
+        "recommendation_reason": "Stateful browser workflows stay hybrid in live smoke.",
+        "source_grounding": {
+          "kind": "npm-package",
+          "evidence_level": "config-only",
+          "inspected": false,
+          "package_name": "chrome-devtools-mcp"
+        }
+      },
+      "artifact": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "server": {
+          "id": "custom-1:chrome-devtools",
+          "name": "chrome-devtools",
+          "source_label": "custom-1",
+          "source_path": "__CONFIG_PATH__",
+          "purpose": "Browser inspection and debugging workflows",
+          "command": "npx",
+          "args": [
+            "-y",
+            "chrome-devtools-mcp@latest"
+          ],
+          "url": null,
+          "env_keys": [],
+          "declared_tool_count": 1,
+          "permission_hints": [],
+          "inferred_permission": "write",
+          "recommendation": "hybrid",
+          "recommendation_reason": "Stateful browser workflows stay hybrid in live smoke.",
+          "source_grounding": {
+            "kind": "npm-package",
+            "evidence_level": "config-only",
+            "inspected": false,
+            "package_name": "chrome-devtools-mcp"
+          }
+        },
+        "kind": "npm-package",
+        "identity": {
+          "value": "chrome-devtools-mcp",
+          "version": "1.0.0"
+        },
+        "blocked": false
+      },
+      "snapshot": {
+        "generated_at": "2026-03-09T00:00:00Z",
+        "artifact": {
+          "generated_at": "2026-03-09T00:00:00Z",
+          "server": {
+            "id": "custom-1:chrome-devtools",
+            "name": "chrome-devtools",
+            "source_label": "custom-1",
+            "source_path": "__CONFIG_PATH__",
+            "purpose": "Browser inspection and debugging workflows",
+            "command": "npx",
+            "args": [
+              "-y",
+              "chrome-devtools-mcp@latest"
+            ],
+            "url": null,
+            "env_keys": [],
+            "declared_tool_count": 1,
+            "permission_hints": [],
+            "inferred_permission": "write",
+            "recommendation": "hybrid",
+            "recommendation_reason": "Stateful browser workflows stay hybrid in live smoke.",
+            "source_grounding": {
+              "kind": "npm-package",
+              "evidence_level": "config-only",
+              "inspected": false,
+              "package_name": "chrome-devtools-mcp"
+            }
+          },
+          "kind": "npm-package",
+          "identity": {
+            "value": "chrome-devtools-mcp",
+            "version": "1.0.0"
+          },
+          "blocked": false
+        },
+        "cache_root": "/tmp/mcpsmith/cache/chrome-devtools",
+        "source_root": "/tmp/mcpsmith/cache/chrome-devtools/source",
+        "reused_cache": false,
+        "manifest_paths": [
+          "/tmp/mcpsmith/cache/chrome-devtools/source/package.json"
+        ]
+      },
+      "runtime_tools": [
+        {
+          "name": "list_pages",
+          "description": "Get a list of pages open in the browser.",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "tool_evidence": [
+        {
+          "tool_name": "list_pages",
+          "runtime_tool": {
+            "name": "list_pages",
+            "description": "Get a list of pages open in the browser.",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "registration": {
+            "file_path": "src/index.ts",
+            "start_line": 8,
+            "end_line": 18,
+            "excerpt": "server.tool('list_pages', ...)",
+            "score": 0.94
+          },
+          "handler": {
+            "file_path": "src/list-pages.ts",
+            "start_line": 20,
+            "end_line": 44,
+            "excerpt": "export async function listPages() {}",
+            "score": 0.93
+          },
+          "required_inputs": [],
+          "confidence": 0.91
+        }
+      ]
+    },
+    "backend_used": "fixture",
+    "backend_fallback_used": false,
+    "tool_conversions": [
+      {
+        "tool_name": "list_pages",
+        "semantic_summary": {
+          "what_it_does": "Lists currently open browser pages in the active debugging session.",
+          "required_inputs": [],
+          "prerequisites": [],
+          "side_effect_level": "write",
+          "success_signals": [
+            "Page list returned"
+          ],
+          "failure_modes": [
+            "No browser session available"
+          ],
+          "citations": [
+            "docs/list-pages.md"
+          ],
+          "confidence": 0.9
+        },
+        "workflow_skill": {
+          "id": "inspect-open-browser-pages",
+          "title": "Inspect open browser pages",
+          "goal": "List the currently open browser pages without relying on the MCP server.",
+          "when_to_use": "Use this when you need to inspect the current browser session tabs.",
+          "trigger_phrases": [
+            "list open tabs",
+            "inspect browser pages"
+          ],
+          "origin_tools": [
+            "list_pages"
+          ],
+          "stop_and_ask": [
+            "Stop if no local browser session or debugging target is available."
+          ],
+          "native_steps": [
+            {
+              "title": "Inspect the local browser session",
+              "command": "python3 - <<'PY'\nprint('inspect local browser pages here')\nPY",
+              "details": "Replace the placeholder with the concrete local browser inspection command for the target environment."
+            }
+          ],
+          "verification": [
+            "Confirm the command completed successfully and returned the current page list."
+          ],
+          "return_contract": [
+            "Return the list of open pages or the captured browser-session artifact."
+          ],
+          "guardrails": [
+            "Do not mutate the local browser session while inspecting it."
+          ],
+          "evidence": [
+            "live smoke fixture"
+          ],
+          "confidence": 0.9
+        }
+      }
+    ]
+  },
+  "findings": []
+}

@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-03-10T09:00:03Z",
+  "status": "applied",
+  "artifacts": {
+    "resolve": ".codex-runtime/runs/playwright-20260310-090000/resolve.json",
+    "snapshot": ".codex-runtime/runs/playwright-20260310-090000/snapshot.json",
+    "evidence": ".codex-runtime/runs/playwright-20260310-090000/evidence.json",
+    "synthesis": ".codex-runtime/runs/playwright-20260310-090000/synthesis.json",
+    "review": ".codex-runtime/runs/playwright-20260310-090000/review.json",
+    "verify": ".codex-runtime/runs/playwright-20260310-090000/verify.json"
+  },
+  "skills_dir": "/tmp/mcpsmith-demo/skills",
+  "config_backup": "/tmp/mcpsmith-demo/mcp.json.bak",
+  "mcp_config_updated": true,
+  "diagnostics": [
+    "Generated 1 workflow skill(s).",
+    "Installed skills under /tmp/mcpsmith-demo/skills/playwright."
+  ]
+}

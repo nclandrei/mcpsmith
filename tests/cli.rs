@@ -150,10 +150,29 @@ fn test_mcpsmith_root_help_lists_agentic_pipeline() {
         .assert()
         .success()
         .stdout(predicate::str::contains("mcpsmith run <server>"))
+        .stdout(predicate::str::contains("mcpsmith resolve <server>"))
+        .stdout(predicate::str::contains("mcpsmith verify <server>"))
         .stdout(predicate::str::contains(
             "Every command is non-interactive.",
         ))
-        .stdout(predicate::str::contains("discover").not());
+        .stdout(predicate::str::contains("\n  discover").not())
+        .stdout(predicate::str::contains("\n  apply").not())
+        .stdout(predicate::str::contains("contract-test").not());
+}
+
+#[test]
+fn test_mcpsmith_rejects_legacy_subcommands() {
+    let ctx = TestContext::new();
+
+    for legacy in ["discover", "build", "contract-test", "apply"] {
+        ctx.cmd()
+            .args(["help", legacy])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "unrecognized subcommand '{legacy}'"
+            )));
+    }
 }
 
 #[test]

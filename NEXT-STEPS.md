@@ -13,6 +13,9 @@ of the tasks below clearly needs them.
 
 ## 1. Remove dead legacy flow
 
+Status:
+- Done on 2026-03-12.
+
 Goal:
 - Delete more of the old v3 `discover/build/contract-test/apply` code and stale references.
 

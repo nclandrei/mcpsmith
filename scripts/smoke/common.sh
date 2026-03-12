@@ -90,8 +90,6 @@ smoke_init_sandbox() {
   SMOKE_HOME="$root/home"
   SMOKE_CONFIG="$root/mcp.json"
   SMOKE_SKILLS_DIR="$root/skills"
-  SMOKE_DOSSIER="$root/dossier.json"
-  SMOKE_REPORT="$root/contract-report.json"
   SMOKE_LOG_DIR="$root/logs"
   SMOKE_CODEX_SOURCE_HOME="${SMOKE_CODEX_SOURCE_HOME:-$(smoke_detect_codex_source_home)}"
   SMOKE_CLAUDE_SOURCE_HOME="${SMOKE_CLAUDE_SOURCE_HOME:-$(smoke_detect_claude_source_home)}"
@@ -412,15 +410,6 @@ smoke_write_server_config() {
     printf '  }\n'
     printf '}\n'
   } >"$path"
-}
-
-smoke_render_live_dossier() {
-  local template_path="$1"
-  local config_path="$2"
-  local output_path="$3"
-  local escaped
-  escaped="$(smoke_escape_sed_replacement "$(smoke_abs_path "$config_path")")"
-  sed "s|__CONFIG_PATH__|$escaped|g" "$template_path" >"$output_path"
 }
 
 smoke_resolve_cli_verify_script() {

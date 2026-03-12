@@ -1,15 +1,14 @@
-use crate::apply::{remove_server_from_config, rollback_server_skill_files};
 use crate::backend::{
     prepare_backend_context, review_tool_conversion_with_backend,
     synthesize_tool_conversion_with_backend,
 };
-use crate::inventory::inspect;
+use crate::install::{remove_server_from_config, rollback_server_skill_files};
 use crate::runtime::introspect_tool_specs;
-use crate::skillset::{default_agents_skills_dir, write_server_skills};
+use crate::skillset::{build_from_bundle, default_agents_skills_dir};
+use crate::source::{default_sources, discover_from_sources};
 use crate::{
     CatalogSourceResolutionStatus, CatalogSyncResult, ConvertBackendConfig, ConvertBackendName,
-    ConvertV3Options, MCPServerProfile, RuntimeTool, ServerDossier, ServerGate, SourceKind,
-    WorkflowSkillSpec,
+    MCPServerProfile, RuntimeTool, SourceKind, WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -261,12 +260,70 @@ fn default_backend_auto() -> bool {
     true
 }
 
+fn inspect_installed_server(
+    server_selector: &str,
+    additional_paths: &[PathBuf],
+) -> Result<MCPServerProfile> {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let sources = default_sources(&home, &cwd, additional_paths);
+    let inventory = discover_from_sources(&sources)?;
+    resolve_server(&inventory.servers, server_selector)
+}
+
+fn resolve_server(servers: &[MCPServerProfile], server_selector: &str) -> Result<MCPServerProfile> {
+    let selector = server_selector.trim();
+    if selector.is_empty() {
+        bail!("Server selector must be non-empty.");
+    }
+
+    if let Some(found) = servers
+        .iter()
+        .find(|s| s.id.eq_ignore_ascii_case(selector))
+        .cloned()
+    {
+        return Ok(found);
+    }
+
+    let mut by_name = servers
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(selector))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if by_name.is_empty() {
+        let known = servers.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        if known.is_empty() {
+            bail!(
+                "No MCP servers discovered in the inspected config paths. Pass --config with an MCP config file or add a local MCP entry first."
+            );
+        }
+        bail!(
+            "No MCP server matched '{selector}'. Known server ids: {}",
+            known.join(", ")
+        );
+    }
+
+    by_name.sort_by(|a, b| a.id.cmp(&b.id));
+    if by_name.len() > 1 {
+        let ids = by_name.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        bail!(
+            "Server name '{selector}' is ambiguous. Use one of: {}",
+            ids.join(", ")
+        );
+    }
+
+    Ok(by_name.remove(0))
+}
+
 pub fn resolve_artifact(
     server_selector: &str,
     additional_paths: &[PathBuf],
     catalog: Option<&CatalogSyncResult>,
 ) -> Result<ResolvedArtifact> {
-    let server = inspect(server_selector, additional_paths)?;
+    let server = inspect_installed_server(server_selector, additional_paths)?;
     let mut diagnostics = vec![];
 
     let mut resolved = if let Some(entrypoint) = server.source_grounding.entrypoint.as_ref() {
@@ -566,11 +623,11 @@ pub fn synthesize_from_evidence(
     evidence: &EvidenceBundle,
     options: &RunOptions,
 ) -> Result<SynthesisReport> {
-    let backend_ctx = prepare_backend_context(&ConvertV3Options {
-        backend: options.backend,
-        backend_auto: options.backend_auto,
-        backend_config: options.backend_config.clone(),
-    })?;
+    let backend_ctx = prepare_backend_context(
+        options.backend,
+        options.backend_auto,
+        &options.backend_config,
+    )?;
 
     let mut tool_conversions = Vec::with_capacity(evidence.tool_evidence.len());
     let mut diagnostics = backend_ctx.selection.diagnostics.clone();
@@ -644,11 +701,11 @@ pub fn review_conversion_bundle(
     bundle: &ServerConversionBundle,
     options: &RunOptions,
 ) -> Result<ReviewReport> {
-    let backend_ctx = prepare_backend_context(&ConvertV3Options {
-        backend: options.backend,
-        backend_auto: options.backend_auto,
-        backend_config: options.backend_config.clone(),
-    })?;
+    let backend_ctx = prepare_backend_context(
+        options.backend,
+        options.backend_auto,
+        &options.backend_config,
+    )?;
     let backend = backend_ctx.selection.selected;
     let evidence_by_tool = bundle
         .evidence
@@ -801,12 +858,14 @@ pub fn run_pipeline(
             .clone()
             .unwrap_or_else(default_agents_skills_dir)
     };
-    fs::create_dir_all(&skills_dir)
-        .with_context(|| format!("Failed to create {}", skills_dir.display()))?;
-
-    let dossier = conversion_bundle_to_dossier(&review.bundle);
-    let (orchestrator, tool_paths, _notes) = write_server_skills(&dossier, &skills_dir)?;
-    let mut diagnostics = vec![format!("Generated {} workflow skill(s).", tool_paths.len())];
+    let build = build_from_bundle(&review.bundle, Some(skills_dir.clone()))?;
+    let built = build
+        .servers
+        .first()
+        .context("Build result did not contain a generated server entry")?;
+    let orchestrator = built.orchestrator_skill_path.clone();
+    let tool_paths = built.tool_skill_paths.clone();
+    let mut diagnostics = built.notes.clone();
     let mut config_backup = None;
     let mut config_updated = false;
 
@@ -1629,31 +1688,6 @@ fn is_executable_token(token: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn conversion_bundle_to_dossier(bundle: &ServerConversionBundle) -> ServerDossier {
-    ServerDossier {
-        generated_at: Utc::now(),
-        format_version: 7,
-        server: bundle.evidence.server.clone(),
-        runtime_tools: bundle.evidence.runtime_tools.clone(),
-        runtime_validations: vec![],
-        workflow_skills: bundle
-            .tool_conversions
-            .iter()
-            .map(|draft| draft.workflow_skill.clone())
-            .collect(),
-        tool_dossiers: vec![],
-        server_gate: if bundle.blocked {
-            ServerGate::Blocked
-        } else {
-            ServerGate::Ready
-        },
-        gate_reasons: bundle.block_reasons.clone(),
-        backend_used: bundle.backend_used.clone(),
-        backend_fallback_used: bundle.backend_fallback_used,
-        backend_diagnostics: bundle.diagnostics.clone(),
-    }
 }
 
 fn find_local_project_root(path: &Path) -> Option<PathBuf> {

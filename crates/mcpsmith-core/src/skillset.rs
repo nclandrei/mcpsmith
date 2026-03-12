@@ -1,66 +1,53 @@
 use crate::{
-    BuildResult, BuildServerResult, CapabilityPlaybook, ConvertPlan, DossierBundle,
-    MCPServerProfile, ManifestToolSkill, ServerDossier, ServerGate, SkillParityManifest,
-    ToolSkillHint, WorkflowSkillSpec,
+    BuildResult, BuildServerResult, HelperScript, ManifestToolSkill, ServerConversionBundle,
+    SkillParityManifest, WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn build_from_bundle(
-    bundle: &DossierBundle,
+    bundle: &ServerConversionBundle,
     skills_dir: Option<PathBuf>,
 ) -> Result<BuildResult> {
-    for dossier in &bundle.dossiers {
-        if dossier.workflow_skills.is_empty() && !dossier.tool_dossiers.is_empty() {
-            bail!(
-                "Legacy tool-dossier bundle '{}' cannot build standalone skills; re-run `mcpsmith discover` with the current version.",
-                dossier.server.id
-            );
-        }
-        if dossier.server_gate == ServerGate::Blocked {
-            let reasons = if dossier.gate_reasons.is_empty() {
-                "no gate reason recorded".to_string()
-            } else {
-                dossier.gate_reasons.join(" | ")
-            };
-            bail!(
-                "Cannot build standalone skills from blocked dossier '{}': {}",
-                dossier.server.id,
-                reasons
-            );
-        }
+    if bundle.blocked {
+        let reasons = if bundle.block_reasons.is_empty() {
+            "no block reason recorded".to_string()
+        } else {
+            bundle.block_reasons.join(" | ")
+        };
+        bail!(
+            "Cannot build standalone skills from blocked review bundle '{}': {}",
+            bundle.evidence.server.id,
+            reasons
+        );
     }
 
     let skills_root = skills_dir.unwrap_or_else(default_agents_skills_dir);
     fs::create_dir_all(&skills_root)
         .with_context(|| format!("Failed to create skills dir {}", skills_root.display()))?;
 
-    let mut servers = Vec::with_capacity(bundle.dossiers.len());
-    for dossier in &bundle.dossiers {
-        let (orchestrator, tool_paths, notes) = write_server_skills(dossier, &skills_root)?;
-        servers.push(BuildServerResult {
-            server_id: dossier.server.id.clone(),
-            orchestrator_skill_path: orchestrator,
-            tool_skill_paths: tool_paths,
-            notes,
-        });
-    }
-
+    let (orchestrator, tool_paths, notes) = write_server_skills(bundle, &skills_root)?;
     Ok(BuildResult {
         generated_at: Utc::now(),
         skills_dir: skills_root,
-        servers,
+        servers: vec![BuildServerResult {
+            server_id: bundle.evidence.server.id.clone(),
+            orchestrator_skill_path: orchestrator,
+            tool_skill_paths: tool_paths,
+            notes,
+        }],
     })
 }
 
 pub(crate) fn write_server_skills(
-    dossier: &ServerDossier,
+    bundle: &ServerConversionBundle,
     root: &Path,
 ) -> Result<(PathBuf, Vec<PathBuf>, Vec<String>)> {
-    let server_slug = sanitize_slug(&dossier.server.name);
+    let server = &bundle.evidence.server;
+    let server_slug = sanitize_slug(&server.name);
     let orchestrator_dir = root.join(&server_slug);
     let orchestrator_path = orchestrator_dir.join("SKILL.md");
     fs::create_dir_all(&orchestrator_dir)
@@ -70,7 +57,9 @@ pub(crate) fn write_server_skills(
     let mut workflow_files = BTreeMap::new();
     let mut manifest_tool_skills = vec![];
     let mut slug_counts = BTreeMap::<String, usize>::new();
-    for workflow in &dossier.workflow_skills {
+
+    for draft in &bundle.tool_conversions {
+        let workflow = &draft.workflow_skill;
         let base_slug = sanitize_slug(&workflow.id);
         let counter = slug_counts.entry(base_slug.clone()).or_insert(0);
         let workflow_slug = if *counter == 0 {
@@ -81,19 +70,23 @@ pub(crate) fn write_server_skills(
         *counter += 1;
 
         let dir_name = format!("{server_slug}--{workflow_slug}");
-        let path = root.join(&dir_name).join("SKILL.md");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        let tool_dir = root.join(&dir_name);
+        let skill_path = tool_dir.join("SKILL.md");
+        fs::create_dir_all(&tool_dir)
+            .with_context(|| format!("Failed to create {}", tool_dir.display()))?;
+
+        for helper in &draft.helper_scripts {
+            write_helper_script(&tool_dir, helper)?;
         }
-        let body = render_workflow_skill_markdown(dossier, workflow);
-        fs::write(&path, body)
-            .with_context(|| format!("Failed to write workflow skill {}", path.display()))?;
-        tool_skill_paths.push(path.clone());
+
+        let body = render_workflow_skill_markdown(&server.name, workflow);
+        fs::write(&skill_path, body)
+            .with_context(|| format!("Failed to write workflow skill {}", skill_path.display()))?;
+        tool_skill_paths.push(skill_path.clone());
         workflow_files.insert(workflow.id.clone(), format!("../{dir_name}/SKILL.md"));
 
         let coverage = if workflow.origin_tools.is_empty() {
-            vec![workflow.id.clone()]
+            vec![draft.tool_name.clone()]
         } else {
             workflow.origin_tools.clone()
         };
@@ -105,7 +98,7 @@ pub(crate) fn write_server_skills(
         }
     }
 
-    let orchestrator = render_orchestrator_v3_markdown(dossier, &workflow_files);
+    let orchestrator = render_orchestrator_skill_markdown(bundle, &workflow_files);
     fs::write(&orchestrator_path, orchestrator).with_context(|| {
         format!(
             "Failed to write orchestrator skill {}",
@@ -116,10 +109,11 @@ pub(crate) fn write_server_skills(
     let manifest = SkillParityManifest {
         format_version: 2,
         generated_at: Utc::now(),
-        server_id: dossier.server.id.clone(),
-        server_name: dossier.server.name.clone(),
+        server_id: server.id.clone(),
+        server_name: server.name.clone(),
         orchestrator_skill: Some("SKILL.md".to_string()),
-        required_tools: dossier
+        required_tools: bundle
+            .evidence
             .runtime_tools
             .iter()
             .map(|tool| normalize_tool_name(&tool.name))
@@ -134,20 +128,49 @@ pub(crate) fn write_server_skills(
         tool_skill_paths.len()
     )];
     notes.push("Wrote internal parity manifest for verify checks.".to_string());
-    if dossier.backend_fallback_used {
-        notes.push("Backend fallback was used during dossier discovery.".to_string());
+    if bundle.backend_fallback_used {
+        notes.push("Backend fallback was used during synthesis or review.".to_string());
     }
     Ok((orchestrator_path, tool_skill_paths, notes))
 }
 
-fn render_orchestrator_v3_markdown(
-    dossier: &ServerDossier,
+fn write_helper_script(tool_dir: &Path, helper: &HelperScript) -> Result<PathBuf> {
+    if helper.relative_path.is_absolute() {
+        bail!(
+            "Helper script path '{}' must be relative.",
+            helper.relative_path.display()
+        );
+    }
+    let path = tool_dir.join(&helper.relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, &helper.body)
+        .with_context(|| format!("Failed to write helper script {}", path.display()))?;
+    #[cfg(unix)]
+    if helper.executable {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)
+            .with_context(|| format!("Failed to chmod {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+fn render_orchestrator_skill_markdown(
+    bundle: &ServerConversionBundle,
     workflow_files: &BTreeMap<String, String>,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Skill: {}\n\n", dossier.server.name.trim()));
+    out.push_str(&format!(
+        "# Skill: {}\n\n",
+        bundle.evidence.server.name.trim()
+    ));
     out.push_str("## Use This When\n\n");
-    out.push_str(&format!("{}\n\n", dossier.server.purpose.trim()));
+    out.push_str(&format!("{}\n\n", bundle.evidence.server.purpose.trim()));
 
     out.push_str("## How To Route Requests\n\n");
     out.push_str(
@@ -160,10 +183,11 @@ fn render_orchestrator_v3_markdown(
     out.push_str("4. Finish by following the workflow's verification and return-contract sections before reporting success.\n\n");
 
     out.push_str("## Workflow Skills\n\n");
-    if dossier.workflow_skills.is_empty() {
+    if bundle.tool_conversions.is_empty() {
         out.push_str("- No standalone workflows are available.\n\n");
     } else {
-        for workflow in &dossier.workflow_skills {
+        for draft in &bundle.tool_conversions {
+            let workflow = &draft.workflow_skill;
             let file = workflow_files
                 .get(&workflow.id)
                 .map(String::as_str)
@@ -180,21 +204,17 @@ fn render_orchestrator_v3_markdown(
     out.push_str("## Shared Guardrails\n\n");
     out.push_str("- Do not guess missing identifiers, paths, or simulator/project context.\n");
     out.push_str("- Prefer the concrete native commands written in each workflow over improvising a different procedure.\n");
-    out.push_str("- Stop and ask the user before destructive or irreversible steps.\n\n");
-
-    if dossier.server_gate == ServerGate::Blocked {
-        out.push_str("## Gate Status\n\n");
-        out.push_str("Standalone conversion is currently blocked:\n");
-        for reason in &dossier.gate_reasons {
-            out.push_str(&format!("- {}\n", reason));
-        }
+    out.push_str("- Stop and ask the user before destructive or irreversible steps.\n");
+    if bundle.backend_fallback_used {
+        out.push_str("- Synthesis or review used a backend fallback; treat unusual outputs with extra scrutiny.\n");
     }
+    out.push('\n');
 
     out
 }
 
-fn render_workflow_skill_markdown(dossier: &ServerDossier, workflow: &WorkflowSkillSpec) -> String {
-    let server_slug = sanitize_slug(&dossier.server.name);
+fn render_workflow_skill_markdown(server_name: &str, workflow: &WorkflowSkillSpec) -> String {
+    let server_slug = sanitize_slug(server_name);
     let mut out = String::new();
     out.push_str(&format!("# Skill: {}\n\n", workflow.title.trim()));
     out.push_str("## Use This When\n\n");
@@ -275,20 +295,32 @@ fn render_workflow_skill_markdown(dossier: &ServerDossier, workflow: &WorkflowSk
     }
 
     out.push_str("## Verification\n\n");
-    for item in &workflow.verification {
-        out.push_str(&format!("- {}\n", item));
+    if workflow.verification.is_empty() {
+        out.push_str("- Confirm the workflow completed as expected.\n");
+    } else {
+        for item in &workflow.verification {
+            out.push_str(&format!("- {}\n", item));
+        }
     }
     out.push('\n');
 
     out.push_str("## What To Return\n\n");
-    for item in &workflow.return_contract {
-        out.push_str(&format!("- {}\n", item));
+    if workflow.return_contract.is_empty() {
+        out.push_str("- Return the concrete result and any important follow-up context.\n");
+    } else {
+        for item in &workflow.return_contract {
+            out.push_str(&format!("- {}\n", item));
+        }
     }
     out.push('\n');
 
     out.push_str("## Stop And Ask\n\n");
-    for item in &workflow.stop_and_ask {
-        out.push_str(&format!("- {}\n", item));
+    if workflow.stop_and_ask.is_empty() {
+        out.push_str("- Stop if the workflow cannot proceed safely with the available context.\n");
+    } else {
+        for item in &workflow.stop_and_ask {
+            out.push_str(&format!("- {}\n", item));
+        }
     }
     out.push('\n');
 
@@ -303,8 +335,12 @@ fn render_workflow_skill_markdown(dossier: &ServerDossier, workflow: &WorkflowSk
     out.push('\n');
 
     out.push_str("## Evidence\n\n");
-    for evidence in &workflow.evidence {
-        out.push_str(&format!("- {}\n", evidence));
+    if workflow.evidence.is_empty() {
+        out.push_str("- Grounded in the reviewed evidence bundle for this MCP.\n");
+    } else {
+        for evidence in &workflow.evidence {
+            out.push_str(&format!("- {}\n", evidence));
+        }
     }
     out.push('\n');
 
@@ -312,233 +348,6 @@ fn render_workflow_skill_markdown(dossier: &ServerDossier, workflow: &WorkflowSk
     out.push_str(&format!("- {:.2}\n", workflow.confidence.clamp(0.0, 1.0)));
 
     out
-}
-
-pub(crate) fn render_orchestrator_skill_markdown(
-    plan: &ConvertPlan,
-    tool_skills: &[ManifestToolSkill],
-) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# Workflow: {}\n\n", plan.server.name.trim()));
-    out.push_str("## Purpose\n\n");
-    out.push_str(&format!("{}\n\n", plan.server.purpose));
-
-    out.push_str("## Capability Skills\n\n");
-    if tool_skills.is_empty() {
-        out.push_str("- No capability skills were generated.\n\n");
-    } else {
-        for skill in tool_skills {
-            let skill_name = installed_skill_reference_name(&skill.skill_file);
-            out.push_str(&format!(
-                "- `${skill_name}`: Executes `{}` operations.\n",
-                skill.tool_name
-            ));
-        }
-        out.push('\n');
-    }
-
-    out.push_str("## Orchestration\n\n");
-    out.push_str("1. Clarify the user goal and select the minimum capability skills needed.\n");
-    out.push_str(
-        "2. Execute capability skills in dependency order, one focused action at a time.\n",
-    );
-    out.push_str("3. After each capability run, validate output and decide next step.\n");
-    out.push_str("4. Stop immediately on errors, report root cause, and suggest recovery.\n\n");
-
-    out.push_str("## Guardrails\n\n");
-    out.push_str(
-        "- Keep explicit user confirmation before destructive or production-impacting steps.\n",
-    );
-    out.push_str(
-        "- When behavior is unclear, inspect tool schemas or run a dry-run/check command first.\n",
-    );
-    if !plan.warnings.is_empty() {
-        for warning in &plan.warnings {
-            out.push_str(&format!("- {}\n", warning));
-        }
-    }
-
-    out
-}
-
-pub(crate) fn render_capability_skill_markdown(
-    server: &MCPServerProfile,
-    tool_name: &str,
-    description: Option<&str>,
-    hint: Option<&ToolSkillHint>,
-) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# Capability: {tool_name}\n\n"));
-    out.push_str("## Purpose\n\n");
-    if let Some(text) = description.map(str::trim).filter(|text| !text.is_empty()) {
-        out.push_str(text);
-        out.push_str("\n\n");
-    } else {
-        out.push_str(&format!(
-            "Execute `{tool_name}` tasks for {}.\n\n",
-            server.purpose.to_lowercase()
-        ));
-    }
-
-    out.push_str("## Execution\n\n");
-    out.push_str("1. Confirm prerequisites and collect only required inputs.\n");
-    out.push_str(&format!(
-        "2. Run the `{tool_name}` capability and capture raw output.\n"
-    ));
-    out.push_str("3. Validate errors, status, and key fields before continuing.\n");
-    out.push_str("4. Return a concise result and next-step recommendation.\n\n");
-
-    out.push_str("## Safety\n\n");
-    out.push_str("- Ask for confirmation before destructive or irreversible actions.\n");
-    out.push_str("- If arguments are unclear, run a non-destructive check first.\n");
-
-    if let Some(hint) = hint {
-        let has_hint = hint.what_it_does.is_some()
-            || hint.when_to_use.is_some()
-            || !hint.inputs_hint.is_empty()
-            || !hint.success_signals.is_empty()
-            || !hint.pitfalls.is_empty();
-        if has_hint {
-            out.push_str("\n## Optional Hints\n\n");
-            if let Some(what_it_does) = &hint.what_it_does {
-                out.push_str(&format!("- What it does: {what_it_does}\n"));
-            }
-            if let Some(when_to_use) = &hint.when_to_use {
-                out.push_str(&format!("- When to use: {when_to_use}\n"));
-            }
-            if !hint.inputs_hint.is_empty() {
-                out.push_str(&format!("- Input hints: {}\n", hint.inputs_hint.join("; ")));
-            }
-            if !hint.success_signals.is_empty() {
-                out.push_str(&format!(
-                    "- Success signals: {}\n",
-                    hint.success_signals.join("; ")
-                ));
-            }
-            if !hint.pitfalls.is_empty() {
-                out.push_str(&format!("- Pitfalls: {}\n", hint.pitfalls.join("; ")));
-            }
-        }
-    }
-
-    out
-}
-
-fn capability_playbooks(
-    server: &MCPServerProfile,
-    fallback_actions: &[String],
-    introspected_tools: Option<&[String]>,
-) -> Vec<CapabilityPlaybook> {
-    let purpose = server.purpose.clone();
-    let introspected_set = introspected_tools
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| normalize_tool_name(item))
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-
-    let mut steps = vec![
-        format!(
-            "Identify the concrete workflow needed for {}.",
-            purpose.to_lowercase()
-        ),
-        "Collect only the context the selected workflow actually needs.".to_string(),
-        "Run the selected workflow deterministically and verify the result before moving on."
-            .to_string(),
-    ];
-    steps.extend(fallback_actions.iter().cloned());
-
-    let fallback_hints = if introspected_set.is_empty() {
-        vec![]
-    } else {
-        let mut names = introspected_set.iter().cloned().collect::<Vec<_>>();
-        names.sort();
-        names
-            .into_iter()
-            .take(6)
-            .map(|tool| format!("{}{}", tool_hint_prefix(server), tool))
-            .collect::<Vec<_>>()
-    };
-
-    vec![CapabilityPlaybook {
-        title: "General orchestration".to_string(),
-        goal: format!(
-            "Perform {} with reproducible sequencing.",
-            purpose.to_lowercase()
-        ),
-        tool_hints: fallback_hints,
-        steps,
-    }]
-}
-
-pub(crate) fn required_tool_hints(
-    server: &MCPServerProfile,
-    introspected_tools: Option<&[String]>,
-) -> Vec<String> {
-    let mut hints = capability_playbooks(server, &[], introspected_tools)
-        .into_iter()
-        .flat_map(|playbook| playbook.tool_hints)
-        .collect::<Vec<_>>();
-    hints.sort();
-    hints.dedup();
-    hints
-}
-
-pub(crate) fn required_tool_names(
-    server: &MCPServerProfile,
-    introspected_tools: Option<&[String]>,
-) -> Vec<String> {
-    if let Some(items) = introspected_tools {
-        let mut names = items
-            .iter()
-            .map(|item| normalize_tool_name(item))
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        if !names.is_empty() {
-            return names;
-        }
-    }
-
-    let mut fallback = required_tool_hints(server, None)
-        .iter()
-        .map(|hint| hint_to_tool_name(hint))
-        .collect::<Vec<_>>();
-    fallback.sort();
-    fallback.dedup();
-    fallback
-}
-
-pub(crate) fn extract_tool_hints_from_skill(content: &str) -> Vec<String> {
-    let mut hints = vec![];
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("- `") || !trimmed.ends_with('`') {
-            continue;
-        }
-        let value = trimmed.trim_start_matches("- `").trim_end_matches('`');
-        if value.starts_with("mcp__") {
-            hints.push(value.to_string());
-        }
-    }
-    hints.sort();
-    hints.dedup();
-    hints
-}
-
-pub(crate) fn hint_to_tool_name(hint: &str) -> String {
-    hint.rsplit("__").next().unwrap_or(hint).trim().to_string()
-}
-
-pub(crate) fn normalize_tool_name(name: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.starts_with("mcp__") {
-        hint_to_tool_name(trimmed)
-    } else {
-        trimmed.to_string()
-    }
 }
 
 pub(crate) fn manifest_path_for_skill(skill_path: &Path) -> Result<PathBuf> {
@@ -574,6 +383,20 @@ pub(crate) fn write_skill_manifest(
     std::fs::write(&manifest_path, format!("{body}\n"))
         .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
     Ok(manifest_path)
+}
+
+pub(crate) fn normalize_tool_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if let Some(stripped) = trimmed.strip_prefix("mcp__") {
+        stripped
+            .rsplit("__")
+            .next()
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub(crate) fn sanitize_slug(input: &str) -> String {
@@ -633,8 +456,4 @@ fn concise_sentence(text: &str) -> String {
     } else {
         format!("{trimmed}.")
     }
-}
-
-fn tool_hint_prefix(server: &MCPServerProfile) -> String {
-    format!("mcp__{}__", server.name)
 }

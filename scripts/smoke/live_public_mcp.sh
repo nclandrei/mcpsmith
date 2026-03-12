@@ -9,7 +9,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/smoke/live_public_mcp.sh --server memory|chrome-devtools|all|xcodebuildmcp [--run-dir PATH]
 
-Runs isolated live MCP smoke verification with dry-run and applied one-shot
+Runs isolated live MCP smoke verification with dry-run and one-shot
 flows, storing captured artifacts under .codex-runtime.
 EOF
 }
@@ -59,7 +59,7 @@ run_live_target() {
   local args=("$@")
 
   local dry_run_root="$RUN_ROOT/$target_name/dry-run"
-  local apply_root="$RUN_ROOT/$target_name/apply"
+  local run_root="$RUN_ROOT/$target_name/run"
 
   smoke_init_sandbox "$dry_run_root"
   smoke_write_server_config \
@@ -77,7 +77,7 @@ run_live_target() {
   smoke_assert_file "$SMOKE_SKILLS_DIR/$target_name/SKILL.md"
   smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$dry_run_root/skills-tree.txt"
 
-  smoke_init_sandbox "$apply_root"
+  smoke_init_sandbox "$run_root"
   smoke_write_server_config \
     "$SMOKE_CONFIG" \
     "$target_name" \
@@ -86,12 +86,12 @@ run_live_target() {
     "$read_only" \
     "${args[@]}"
 
-  smoke_capture_mcpsmith apply "$target_name" --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
-  smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"status\": \"applied\""
-  smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"mcp_config_updated\": true"
+  smoke_capture_mcpsmith run "$target_name" --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
+  smoke_assert_contains "$SMOKE_LOG_DIR/run.stdout" "\"status\": \"applied\""
+  smoke_assert_contains "$SMOKE_LOG_DIR/run.stdout" "\"mcp_config_updated\": true"
   smoke_assert_not_contains "$SMOKE_CONFIG" "\"$target_name\""
   smoke_assert_file "$SMOKE_SKILLS_DIR/$target_name/SKILL.md"
-  smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$apply_root/skills-tree.txt"
+  smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$run_root/skills-tree.txt"
 }
 
 run_xcode_optional() {
