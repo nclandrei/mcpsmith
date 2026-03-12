@@ -164,6 +164,14 @@ smoke_assert_not_contains() {
   fi
 }
 
+smoke_json_artifact_path() {
+  local file="$1"
+  local path
+  path="$(sed -n 's/^[[:space:]]*"artifact_path":[[:space:]]*"\(.*\)",$/\1/p' "$file" | head -n1)"
+  [[ -n "$path" ]] || smoke_die "artifact_path not found in $file"
+  printf '%s\n' "$path"
+}
+
 smoke_save_skills_tree() {
   local skills_dir="$1"
   local output="$2"
@@ -204,62 +212,160 @@ EOF
 
 smoke_write_mock_codex_script() {
   local path="$1"
-  shift
-  local confidence="${1:-0.9}"
   shift || true
-  local workflows=()
-  for name in "$@"; do
-    workflows+=("{\"id\":\"$name\",\"title\":\"$name workflow\",\"goal\":\"Perform $name operations without relying on the MCP server.\",\"when_to_use\":\"Use this when you need to run the $name workflow with native commands.\",\"trigger_phrases\":[\"run $name\",\"use $name\"],\"origin_tools\":[\"$name\"],\"stop_and_ask\":[\"Stop if the required inputs are ambiguous or the native command would mutate state unexpectedly.\"],\"native_steps\":[{\"title\":\"Run the native command\",\"command\":\"printf '%s\\\\n' 'collected query goes here'\",\"details\":\"Replace 'collected query goes here' with the exact collected query value before running the command.\"}],\"verification\":[\"Confirm the native command completed successfully and produced output.\"],\"return_contract\":[\"Return the command output together with the exact query value used.\"],\"confidence\":${confidence}}")
-  done
-  local payload
-  payload="$(IFS=,; printf '%s' "${workflows[*]}")"
   cat >"$path" <<EOF
-#!/bin/sh
-if [ "\$1" = "--version" ] || [ "\$1" = "-v" ] || [ "\$1" = "version" ]; then
-  echo "mock-codex"
-  exit 0
-fi
-last_message_file=""
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    --output-last-message|-o)
-      last_message_file="\$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-cat >/dev/null
-[ -n "\$last_message_file" ] || exit 12
-cat >"\$last_message_file" <<'JSON'
-{"workflow_skills":[${payload}]}
-JSON
+#!/usr/bin/env python3
+import json
+import re
+import sys
+
+def tool_name(prompt: str) -> str:
+    match = re.search(r'"tool_name"\\s*:\\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    match = re.search(r'"name"\\s*:\\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    return "execute"
+
+def build_payload(name: str):
+    return {
+        "semantic_summary": {
+            "what_it_does": f"The {name} tool runs a grounded local workflow for the requested query.",
+            "required_inputs": ["query"],
+            "prerequisites": [],
+            "side_effect_level": "read-only",
+            "success_signals": ["Command exits successfully.", "The output includes the requested query."],
+            "failure_modes": ["Missing required query input."],
+            "citations": ["README.md", "tests/cli.rs", "scripts/smoke/mock_fixture_flow.sh"],
+            "confidence": 0.91,
+        },
+        "workflow_skill": {
+            "id": name,
+            "title": f"{name} workflow",
+            "goal": f"Run the {name} workflow without relying on the MCP transport.",
+            "when_to_use": f"Use this when you need to run the {name} workflow locally.",
+            "trigger_phrases": [f"run {name}", f"use {name}"],
+            "origin_tools": [name],
+            "required_context": [
+                {
+                    "name": "query",
+                    "guidance": "Collect the exact query or target before running the workflow.",
+                    "required": True,
+                }
+            ],
+            "context_acquisition": ["If the query is missing, ask the user for it instead of guessing."],
+            "stop_and_ask": ["Stop if the query is ambiguous."],
+            "native_steps": [
+                {
+                    "title": "Run the local command",
+                    "command": "printf '%s\\\\n' \"\$QUERY\"",
+                    "details": "Collect the exact query before running the command.",
+                }
+            ],
+            "verification": ["Confirm the command returned output for the provided query."],
+            "return_contract": ["Return the command output and the query that was used."],
+            "guardrails": ["Do not invent query values."],
+            "evidence": ["README.md", "tests/cli.rs", "scripts/smoke/mock_fixture_flow.sh"],
+            "confidence": 0.91,
+        },
+    }
+
+if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
+    print("mock-codex")
+    sys.exit(0)
+
+output_path = None
+for idx, arg in enumerate(sys.argv):
+    if arg in ("--output-last-message", "-o") and idx + 1 < len(sys.argv):
+        output_path = sys.argv[idx + 1]
+        break
+
+prompt = sys.stdin.read()
+if "reviewing a generated skill draft for correctness and grounding" in prompt:
+    body = json.dumps({"approved": True, "findings": [], "revised_draft": None})
+else:
+    body = json.dumps(build_payload(tool_name(prompt)))
+if output_path:
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+else:
+    print(json.dumps({"output": body}))
 EOF
   chmod +x "$path"
 }
 
 smoke_write_mock_claude_script() {
   local path="$1"
-  shift
-  local workflows=()
-  local name
-  for name in "$@"; do
-    workflows+=("{\"id\":\"$name\",\"title\":\"$name workflow\",\"goal\":\"Perform $name operations without relying on the MCP server.\",\"when_to_use\":\"Use this when you need to run the $name workflow with native commands.\",\"trigger_phrases\":[\"run $name\",\"use $name\"],\"origin_tools\":[\"$name\"],\"stop_and_ask\":[\"Stop if the required inputs are ambiguous or the native command would mutate state unexpectedly.\"],\"native_steps\":[{\"title\":\"Run the native command\",\"command\":\"printf '%s\\\\n' 'collected query goes here'\",\"details\":\"Replace 'collected query goes here' with the exact collected query value before running the command.\"}],\"verification\":[\"Confirm the native command completed successfully and produced output.\"],\"return_contract\":[\"Return the command output together with the exact query value used.\"],\"confidence\":0.85}")
-  done
-  local payload
-  payload="$(IFS=,; printf '%s' "${workflows[*]}")"
+  shift || true
   cat >"$path" <<EOF
-#!/bin/sh
-if [ "\$1" = "--version" ] || [ "\$1" = "-v" ] || [ "\$1" = "version" ]; then
-  echo "mock-claude"
-  exit 0
-fi
-cat >/dev/null
-cat <<'JSON'
-{"workflow_skills":[${payload}]}
-JSON
+#!/usr/bin/env python3
+import json
+import re
+import sys
+
+def tool_name(prompt: str) -> str:
+    match = re.search(r'"tool_name"\\s*:\\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    match = re.search(r'"name"\\s*:\\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    return "execute"
+
+def build_payload(name: str):
+    return {
+        "semantic_summary": {
+            "what_it_does": f"The {name} tool runs a grounded local workflow for the requested query.",
+            "required_inputs": ["query"],
+            "prerequisites": [],
+            "side_effect_level": "read-only",
+            "success_signals": ["Command exits successfully.", "The output includes the requested query."],
+            "failure_modes": ["Missing required query input."],
+            "citations": ["README.md", "tests/cli.rs", "scripts/smoke/mock_fixture_flow.sh"],
+            "confidence": 0.85,
+        },
+        "workflow_skill": {
+            "id": name,
+            "title": f"{name} workflow",
+            "goal": f"Run the {name} workflow without relying on the MCP transport.",
+            "when_to_use": f"Use this when you need to run the {name} workflow locally.",
+            "trigger_phrases": [f"run {name}", f"use {name}"],
+            "origin_tools": [name],
+            "required_context": [
+                {
+                    "name": "query",
+                    "guidance": "Collect the exact query or target before running the workflow.",
+                    "required": True,
+                }
+            ],
+            "context_acquisition": ["If the query is missing, ask the user for it instead of guessing."],
+            "stop_and_ask": ["Stop if the query is ambiguous."],
+            "native_steps": [
+                {
+                    "title": "Run the local command",
+                    "command": "printf '%s\\\\n' \"\$QUERY\"",
+                    "details": "Collect the exact query before running the command.",
+                }
+            ],
+            "verification": ["Confirm the command returned output for the provided query."],
+            "return_contract": ["Return the command output and the query that was used."],
+            "guardrails": ["Do not invent query values."],
+            "evidence": ["README.md", "tests/cli.rs", "scripts/smoke/mock_fixture_flow.sh"],
+            "confidence": 0.85,
+        },
+    }
+
+if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
+    print("mock-claude")
+    sys.exit(0)
+
+prompt = sys.stdin.read()
+if "reviewing a generated skill draft for correctness and grounding" in prompt:
+    payload = {"approved": True, "findings": [], "revised_draft": None}
+else:
+    payload = build_payload(tool_name(prompt))
+print(json.dumps({"output": json.dumps(payload)}))
 EOF
   chmod +x "$path"
 }

@@ -24,20 +24,13 @@ impl TestContext {
 
     pub fn cmd(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("mcpsmith");
+        cmd.current_dir(self.home());
         cmd.env("HOME", self.home());
         cmd
     }
 
     pub fn config_path(&self) -> PathBuf {
         self.path("settings.json")
-    }
-
-    pub fn dossier_path(&self) -> PathBuf {
-        self.path("dossier.json")
-    }
-
-    pub fn report_path(&self) -> PathBuf {
-        self.path("contract-report.json")
     }
 
     pub fn skills_dir(&self) -> PathBuf {
@@ -68,13 +61,49 @@ impl TestContext {
         description: Option<&str>,
         read_only: Option<bool>,
     ) {
-        write_server_config(
-            &self.config_path(),
-            server_name,
-            command,
-            description,
-            read_only,
+        let mut server = Map::new();
+        server.insert(
+            "command".to_string(),
+            Value::String(command.to_string_lossy().into_owned()),
         );
+        if let Some(description) = description {
+            server.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
+        if let Some(read_only) = read_only {
+            server.insert("readOnly".to_string(), Value::Bool(read_only));
+        }
+
+        let mut servers = Map::new();
+        servers.insert(server_name.to_string(), Value::Object(server));
+
+        let mut root = Map::new();
+        root.insert("mcpServers".to_string(), Value::Object(servers));
+
+        fs::write(
+            self.config_path(),
+            serde_json::to_string_pretty(&Value::Object(root)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    pub fn write_remote_server_config(&self, server_name: &str, url: &str) {
+        let mut server = Map::new();
+        server.insert("url".to_string(), Value::String(url.to_string()));
+
+        let mut servers = Map::new();
+        servers.insert(server_name.to_string(), Value::Object(server));
+
+        let mut root = Map::new();
+        root.insert("mcpServers".to_string(), Value::Object(servers));
+
+        fs::write(
+            self.config_path(),
+            serde_json::to_string_pretty(&Value::Object(root)).unwrap(),
+        )
+        .unwrap();
     }
 }
 
@@ -93,6 +122,47 @@ pub fn count_backups(config_path: &Path) -> usize {
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
         .count()
+}
+
+pub fn write_local_source_layout(ctx: &TestContext, tool_name: &str) {
+    fs::create_dir_all(ctx.path("src")).unwrap();
+    fs::create_dir_all(ctx.path("tests")).unwrap();
+    fs::write(
+        ctx.path("package.json"),
+        format!(
+            r#"{{
+  "name": "@acme/{tool_name}-mcp",
+  "version": "1.2.3",
+  "repository": {{
+    "type": "git",
+    "url": "https://github.com/acme/{tool_name}-mcp.git"
+  }}
+}}
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path("README.md"),
+        format!(
+            "# Demo MCP\n\nThe `{tool_name}` tool reads a query string and returns text output.\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path("src/server.ts"),
+        format!(
+            "export function register(server) {{\n  server.tool(\"{tool_name}\", {{ description: \"Tool {tool_name}\", inputSchema: {{ type: \"object\", required: [\"query\"], properties: {{ query: {{ type: \"string\" }} }} }} }}, async (args) => handle{tool_name}(args));\n}}\n\nasync function handle{tool_name}(args) {{\n  return {{ content: [{{ type: \"text\", text: args.query }}], isError: false }};\n}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path(format!("tests/{tool_name}.spec.ts")),
+        format!(
+            "it(\"handles {tool_name}\", async () => {{\n  const result = await callTool(\"{tool_name}\", {{ query: \"demo\" }});\n  expect(result.isError).toBe(false);\n}});\n"
+        ),
+    )
+    .unwrap();
 }
 
 pub fn write_mock_mcp_script(path: &Path, tool_names: &[&str]) {
@@ -129,281 +199,135 @@ done
     write_agent_script(path, &body);
 }
 
-pub fn write_counting_mock_mcp_script(path: &Path, count_path: &Path, tool_names: &[&str]) {
-    let tools = tool_names
-        .iter()
-        .map(|name| {
-            format!(
-                r#"{{\"name\":\"{name}\",\"description\":\"Tool {name}\",\"inputSchema\":{{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{{\"query\":{{\"type\":\"string\"}}}}}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let count_path = count_path.to_string_lossy();
-    let body = format!(
-        r#"#!/bin/sh
-printf 'start\n' >> '{count_path}'
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{tools}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      if echo "$line" | grep -q '"query":"'; then
-        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
-      else
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid query"}}}}\n'
-      fi
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
-}
-
 pub fn write_mock_codex_script(path: &Path) {
-    write_mock_codex_script_for(path, &["execute"]);
-}
-
-pub fn write_mock_codex_script_for(path: &Path, tools: &[&str]) {
-    let payload = render_workflow_payload(tools, 0.9);
-    let body = format!(
-        r#"#!/bin/sh
-if [ "$1" = "--version" ] || [ "$1" = "-v" ] || [ "$1" = "version" ]; then
-  echo "mock-codex"
-  exit 0
-fi
-last_message_file=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --output-last-message|-o)
-      last_message_file="$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-cat > /dev/null
-[ -n "$last_message_file" ] || exit 12
-cat > "$last_message_file" <<'JSON'
-{payload}
-JSON
-"#
-    );
-    write_agent_script(path, &body);
+    write_mock_backend_script(path, "mock-codex");
 }
 
 pub fn write_mock_claude_script(path: &Path) {
-    write_mock_claude_script_for(path, &["execute"]);
+    write_mock_backend_script(path, "mock-claude");
 }
 
-pub fn write_mock_claude_script_for(path: &Path, tools: &[&str]) {
-    let payload = render_workflow_payload(tools, 0.85);
-    let body = format!(
-        r#"#!/bin/sh
-if [ "$1" = "--version" ] || [ "$1" = "-v" ] || [ "$1" = "version" ]; then
-  echo "mock-claude"
-  exit 0
-fi
-cat > /dev/null
-cat <<'JSON'
-{payload}
-JSON
-"#
-    );
-    write_agent_script(path, &body);
+pub fn write_mock_codex_script_with_review_fix(path: &Path) {
+    write_mock_backend_script_with_mode(path, "mock-codex", true);
 }
 
-pub fn write_mock_mcp_no_schema_script(path: &Path, tool_name: &str) {
-    let body = format!(
-        r#"#!/bin/sh
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}"}}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
+fn write_mock_backend_script(path: &Path, version_label: &str) {
+    write_mock_backend_script_with_mode(path, version_label, false);
 }
 
-pub fn write_mock_mcp_id_schema_script(path: &Path, tool_name: &str) {
-    let body = format!(
-        r#"#!/bin/sh
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}","description":"delete item","inputSchema":{{"type":"object","required":["id"],"properties":{{"id":{{"type":"string"}}}}}}}}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      if echo "$line" | grep -q '"id":"'; then
-        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
-      else
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"missing id"}}}}\n'
-      fi
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
-}
+fn write_mock_backend_script_with_mode(path: &Path, version_label: &str, revise_review: bool) {
+    let body = r#"#!/usr/bin/env python3
+import json
+import re
+import sys
 
-pub fn write_mock_mcp_context_error_script(path: &Path, tool_name: &str) {
-    let body = format!(
-        r#"#!/bin/sh
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}","description":"inspect workspace state","inputSchema":{{"type":"object","required":["workspaceRoot"],"properties":{{"workspaceRoot":{{"type":"string"}}}}}}}}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      if echo "$line" | grep -q '"workspaceRoot":"sample"'; then
-        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ENOENT: no such file or directory, stat '\''sample'\''"}}],"isError":true}}}}\n'
-      else
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"missing workspaceRoot"}}}}\n'
-      fi
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
-}
+VERSION = __VERSION__
+REVISE_REVIEW = __REVISE__
 
-pub fn write_mock_mcp_session_defaults_script(path: &Path, tool_name: &str) {
-    let body = format!(
-        r#"#!/bin/sh
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool_name}","description":"Manage session defaults","inputSchema":{{"type":"object","properties":{{"arch":{{"type":"string","enum":["arm64","x86_64"]}}}}}}}}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      if echo "$line" | grep -q '"arch":"invalid"'; then
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid arch"}}}}\n'
-      elif echo "$line" | grep -q '"arguments":{{}}'; then
-        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"Defaults updated"}}],"isError":false}}}}\n'
-      else
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"unexpected arguments"}}}}\n'
-      fi
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
-}
+def tool_name(prompt: str) -> str:
+    match = re.search(r'"tool_name"\s*:\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    match = re.search(r'"name"\s*:\s*"([^"]+)"', prompt)
+    if match:
+        return match.group(1)
+    return "execute"
 
-pub fn write_leaking_mock_mcp_script(path: &Path, pid_path: &Path, tool_names: &[&str]) {
-    let tools = tool_names
-        .iter()
-        .map(|name| {
-            format!(
-                r#"{{\"name\":\"{name}\",\"description\":\"Tool {name}\",\"inputSchema\":{{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{{\"query\":{{\"type\":\"string\"}}}}}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let pid_path = pid_path.to_string_lossy();
-    let body = format!(
-        r#"#!/bin/sh
-spawn_child() {{
-  sh -c 'printf "%s\n" "$$" >> '"'"'{pid_path}'"'"'; sleep 30' >/dev/null 2>&1 &
-}}
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-03-26","capabilities":{{}}}}}}\n'
-      ;;
-    *'"method":"tools/list"'*)
-      printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{tools}]}}}}\n'
-      ;;
-    *'"method":"tools/call"'*)
-      spawn_child
-      if echo "$line" | grep -q '"query":"'; then
-        printf '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n'
-      else
-        printf '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32602,"message":"invalid query"}}}}\n'
-      fi
-      ;;
-  esac
-done
-"#
-    );
-    write_agent_script(path, &body);
-}
-
-fn write_server_config(
-    path: &Path,
-    server_name: &str,
-    command: &Path,
-    description: Option<&str>,
-    read_only: Option<bool>,
-) {
-    let mut server = Map::new();
-    server.insert(
-        "command".to_string(),
-        Value::String(command.to_string_lossy().into_owned()),
-    );
-    if let Some(description) = description {
-        server.insert(
-            "description".to_string(),
-            Value::String(description.to_string()),
-        );
-    }
-    if let Some(read_only) = read_only {
-        server.insert("readOnly".to_string(), Value::Bool(read_only));
+def build_draft(name: str, placeholder: bool):
+    step_details = "TODO_REVIEW_FIX" if placeholder else "Collect the exact query before running the command."
+    return {
+        "tool_name": name,
+        "semantic_summary": {
+            "what_it_does": f"The {name} tool runs a grounded local workflow for the requested query.",
+            "required_inputs": ["query"],
+            "prerequisites": [],
+            "side_effect_level": "read-only",
+            "success_signals": ["Command exits successfully.", "The output includes the requested query."],
+            "failure_modes": ["Missing required query input."],
+            "citations": ["mock-mcp.sh", "src/server.ts", f"tests/{name}.spec.ts"],
+            "confidence": 0.91
+        },
+        "workflow_skill": {
+            "id": name,
+            "title": f"{name} workflow",
+            "goal": f"Run the {name} workflow without relying on the MCP transport.",
+            "when_to_use": f"Use this when you need to run the {name} workflow locally.",
+            "trigger_phrases": [f"run {name}", f"use {name}"],
+            "origin_tools": [name],
+            "required_context": [
+                {
+                    "name": "query",
+                    "guidance": "Collect the exact query or target before running the workflow.",
+                    "required": True
+                }
+            ],
+            "context_acquisition": ["If the query is missing, ask the user for it instead of guessing."],
+            "stop_and_ask": ["Stop if the query is ambiguous."],
+            "native_steps": [
+                {
+                    "title": "Run the local command",
+                    "command": "printf '%s\\n' \"$QUERY\"",
+                    "details": step_details
+                }
+            ],
+            "verification": ["Confirm the command returned output for the provided query."],
+            "return_contract": ["Return the command output and the query that was used."],
+            "guardrails": ["Do not invent query values."],
+            "evidence": ["mock-mcp.sh", "src/server.ts", f"tests/{name}.spec.ts"],
+            "confidence": 0.91
+        },
+        "helper_scripts": []
     }
 
-    let mut servers = Map::new();
-    servers.insert(server_name.to_string(), Value::Object(server));
+def build_synthesis(name: str, placeholder: bool):
+    draft = build_draft(name, placeholder)
+    return {
+        "semantic_summary": draft["semantic_summary"],
+        "workflow_skill": draft["workflow_skill"]
+    }
 
-    let mut root = Map::new();
-    root.insert("mcpServers".to_string(), Value::Object(servers));
+if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
+    print(VERSION)
+    sys.exit(0)
 
-    fs::write(
-        path,
-        serde_json::to_string_pretty(&Value::Object(root)).unwrap(),
-    )
-    .unwrap();
-}
+output_path = None
+for idx, arg in enumerate(sys.argv):
+    if arg in ("--output-last-message", "-o") and idx + 1 < len(sys.argv):
+        output_path = sys.argv[idx + 1]
+        break
 
-fn render_workflow_payload(tools: &[&str], confidence: f64) -> String {
-    let workflows = tools
-        .iter()
-        .map(|name| {
-            format!(
-                r#"{{"id":"{name}","title":"{name} workflow","goal":"Perform {name} operations without relying on the MCP server.","when_to_use":"Use this when you need to run the {name} workflow with native commands.","trigger_phrases":["run {name}","use {name}"],"origin_tools":["{name}"],"prerequisite_workflows":[],"followup_workflows":[],"required_context":[{{"name":"query","guidance":"Collect the exact query or target before running the workflow.","required":true}}],"context_acquisition":["If the query is missing, ask the user for it instead of guessing."],"branching_rules":["If the target context is not ready, stop and gather it before running native commands."],"stop_and_ask":["Stop if the workflow would mutate state unexpectedly or the query is ambiguous."],"native_steps":[{{"title":"Run the native command","command":"printf '%s\\n' '{name}:$QUERY'","details":"Replace $QUERY with the exact collected query value."}}],"verification":["Confirm the native command completed successfully and returned output."],"return_contract":["Return the command output together with the exact query that was used."],"guardrails":["Do not invent query values or hidden defaults."],"evidence":["runtime metadata"],"confidence":{confidence}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+prompt = sys.stdin.read()
+name = tool_name(prompt)
 
-    format!(r#"{{"workflow_skills":[{workflows}]}}"#)
+if "reviewing a generated skill draft" in prompt:
+    needs_fix = REVISE_REVIEW and "TODO_REVIEW_FIX" in prompt
+    if needs_fix:
+        payload = {
+            "approved": False,
+            "findings": ["Removed placeholder detail text and kept the workflow grounded."],
+            "revised_draft": build_draft(name, False)
+        }
+    else:
+        payload = {
+            "approved": True,
+            "findings": [],
+            "revised_draft": None
+        }
+elif "converting one MCP tool into a standalone local skill" in prompt:
+    payload = build_synthesis(name, REVISE_REVIEW)
+else:
+    payload = {"approved": True, "findings": [], "revised_draft": None}
+
+body = json.dumps(payload)
+if output_path:
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+else:
+    print(json.dumps({"output": body}))
+"#
+    .replace("__VERSION__", &format!("{version_label:?}"))
+    .replace("__REVISE__", if revise_review { "True" } else { "False" });
+    write_agent_script(path, &body);
 }
 
 fn write_agent_script(path: &Path, body: &str) {

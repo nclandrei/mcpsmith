@@ -2,8 +2,9 @@ use crate::skillset::normalize_tool_name;
 use crate::{
     BackendContext, BackendHealthStatus, BackendSelection, ConvertBackendConfig,
     ConvertBackendHealthReport, ConvertBackendName, ConvertBackendPreference, ConvertV3Options,
-    DEFAULT_BACKEND_TIMEOUT_SECONDS, MCPServerProfile, RuntimeTool, ToolEnrichmentResponse,
-    ToolSkillHint, ToolSpec, WorkflowSkillSpec,
+    DEFAULT_BACKEND_TIMEOUT_SECONDS, MCPServerProfile, RuntimeTool, ToolConversionDraft,
+    ToolEnrichmentResponse, ToolEvidencePack, ToolSemanticSummary, ToolSkillHint, ToolSpec,
+    WorkflowSkillSpec,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -701,6 +702,349 @@ fn parse_backend_workflow_response(raw: &str) -> Result<BackendWorkflowResponse>
         bail!("Backend response contained no workflow_skills.");
     }
     Ok(response)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackendSkillSynthesisResponse {
+    semantic_summary: ToolSemanticSummary,
+    workflow_skill: WorkflowSkillSpec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BackendReviewResponse {
+    pub(crate) approved: bool,
+    #[serde(default)]
+    pub(crate) findings: Vec<String>,
+    #[serde(default)]
+    pub(crate) revised_draft: Option<ToolConversionDraft>,
+}
+
+pub(crate) fn synthesize_tool_conversion_with_backend(
+    backend_name: ConvertBackendName,
+    server: &MCPServerProfile,
+    evidence: &ToolEvidencePack,
+    timeout_seconds: u64,
+) -> Result<ToolConversionDraft> {
+    let backend = backend_by_name(backend_name, timeout_seconds);
+    let raw = backend.explain_tool_chunk(
+        &build_tool_synthesis_prompt(server, evidence),
+        &tool_synthesis_schema(),
+    )?;
+    let parsed: BackendSkillSynthesisResponse =
+        serde_json::from_str(raw.trim()).with_context(|| {
+            format!(
+                "Backend response is not valid synthesis JSON: {}",
+                clipped_preview(raw.trim(), 280)
+            )
+        })?;
+
+    let mut known_tools = BTreeSet::new();
+    known_tools.insert(normalize_tool_name(&evidence.tool_name));
+
+    Ok(ToolConversionDraft {
+        tool_name: evidence.tool_name.clone(),
+        semantic_summary: parsed.semantic_summary,
+        workflow_skill: normalize_workflow_skill(parsed.workflow_skill, &known_tools),
+        helper_scripts: vec![],
+    })
+}
+
+pub(crate) fn review_tool_conversion_with_backend(
+    backend_name: ConvertBackendName,
+    server: &MCPServerProfile,
+    evidence: &ToolEvidencePack,
+    draft: &ToolConversionDraft,
+    timeout_seconds: u64,
+) -> Result<BackendReviewResponse> {
+    let backend = backend_by_name(backend_name, timeout_seconds);
+    let raw = backend.explain_tool_chunk(
+        &build_tool_review_prompt(server, evidence, draft),
+        &tool_review_schema(),
+    )?;
+    serde_json::from_str(raw.trim()).with_context(|| {
+        format!(
+            "Backend response is not valid review JSON: {}",
+            clipped_preview(raw.trim(), 280)
+        )
+    })
+}
+
+fn build_tool_synthesis_prompt(server: &MCPServerProfile, evidence: &ToolEvidencePack) -> String {
+    let evidence_json = serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "You are converting one MCP tool into a standalone local skill.\n\
+Return ONLY JSON matching the provided schema.\n\
+Do not invent behavior that is not supported by the evidence.\n\
+Prefer handler code and tests over README claims.\n\
+Do not mention MCP transport names like tools/list, tools/call, or `mcp__...` in the workflow text.\n\
+Use plain-English workflow instructions plus concrete native commands when the evidence supports them.\n\
+If helper scripts are not necessary, do not invent them.\n\
+\n\
+Server: {}\n\
+Purpose: {}\n\
+Tool evidence pack JSON:\n{}\n\
+\n\
+Requirements:\n\
+- semantic_summary.what_it_does: one concise paragraph\n\
+- semantic_summary.required_inputs: stable input names inferred from schema/evidence\n\
+- semantic_summary.prerequisites: explicit prerequisites only\n\
+- semantic_summary.side_effect_level: one of read-only, write, destructive, unknown\n\
+- semantic_summary.success_signals and failure_modes: short, concrete items\n\
+- semantic_summary.citations: relative source paths from the evidence pack\n\
+- workflow_skill: produce a valid grounded workflow skill for this one tool\n\
+- workflow_skill.origin_tools must include the tool name\n\
+- workflow_skill.evidence should include short evidence/citation lines\n\
+- native_steps commands must be executable shell snippets, not prose placeholders\n\
+- If evidence is weak, stay conservative and use stop-and-ask guidance instead of guessing.\n",
+        server.name, server.purpose, evidence_json
+    )
+}
+
+fn build_tool_review_prompt(
+    server: &MCPServerProfile,
+    evidence: &ToolEvidencePack,
+    draft: &ToolConversionDraft,
+) -> String {
+    let evidence_json = serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string());
+    let draft_json = serde_json::to_string_pretty(draft).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "You are reviewing a generated skill draft for correctness and grounding.\n\
+Return ONLY JSON matching the provided schema.\n\
+Apply this rubric strictly:\n\
+- no placeholders/TODO/TBD\n\
+- no MCP transport references\n\
+- prerequisites must be explicit and conservative\n\
+- claims must be grounded in the provided evidence\n\
+- workflow must be in plain English and executable where commands are provided\n\
+- prefer short concrete fixes over rewrites\n\
+\n\
+Server: {}\n\
+Purpose: {}\n\
+Tool evidence pack JSON:\n{}\n\
+\n\
+Draft JSON:\n{}\n\
+\n\
+If the draft is acceptable, set approved=true and findings=[].\n\
+If not, set approved=false, provide findings, and include revised_draft with fixes applied.\n",
+        server.name, server.purpose, evidence_json, draft_json
+    )
+}
+
+fn tool_synthesis_schema() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["semantic_summary", "workflow_skill"],
+        "properties": {
+            "semantic_summary": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "what_it_does",
+                    "required_inputs",
+                    "prerequisites",
+                    "side_effect_level",
+                    "success_signals",
+                    "failure_modes",
+                    "citations",
+                    "confidence"
+                ],
+                "properties": {
+                    "what_it_does": { "type": "string" },
+                    "required_inputs": { "type": "array", "items": { "type": "string" } },
+                    "prerequisites": { "type": "array", "items": { "type": "string" } },
+                    "side_effect_level": { "type": "string" },
+                    "success_signals": { "type": "array", "items": { "type": "string" } },
+                    "failure_modes": { "type": "array", "items": { "type": "string" } },
+                    "citations": { "type": "array", "items": { "type": "string" } },
+                    "confidence": { "type": "number" }
+                }
+            },
+            "workflow_skill": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "id",
+                    "title",
+                    "goal",
+                    "when_to_use",
+                    "trigger_phrases",
+                    "origin_tools",
+                    "stop_and_ask",
+                    "native_steps",
+                    "verification",
+                    "return_contract",
+                    "confidence"
+                ],
+                "properties": {
+                    "id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "goal": { "type": "string" },
+                    "when_to_use": { "type": "string" },
+                    "trigger_phrases": { "type": "array", "items": { "type": "string" } },
+                    "origin_tools": { "type": "array", "items": { "type": "string" } },
+                    "prerequisite_workflows": { "type": "array", "items": { "type": "string" } },
+                    "followup_workflows": { "type": "array", "items": { "type": "string" } },
+                    "required_context": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["name", "guidance", "required"],
+                            "properties": {
+                                "name": { "type": "string" },
+                                "guidance": { "type": "string" },
+                                "required": { "type": "boolean" }
+                            }
+                        }
+                    },
+                    "context_acquisition": { "type": "array", "items": { "type": "string" } },
+                    "branching_rules": { "type": "array", "items": { "type": "string" } },
+                    "stop_and_ask": { "type": "array", "items": { "type": "string" } },
+                    "native_steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["title", "command", "details"],
+                            "properties": {
+                                "title": { "type": "string" },
+                                "command": { "type": "string" },
+                                "details": { "type": ["string", "null"] }
+                            }
+                        }
+                    },
+                    "verification": { "type": "array", "items": { "type": "string" } },
+                    "return_contract": { "type": "array", "items": { "type": "string" } },
+                    "guardrails": { "type": "array", "items": { "type": "string" } },
+                    "evidence": { "type": "array", "items": { "type": "string" } },
+                    "confidence": { "type": "number" }
+                }
+            }
+        }
+    }))
+    .expect("synthesis schema should serialize")
+}
+
+fn tool_review_schema() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approved", "findings", "revised_draft"],
+        "properties": {
+            "approved": { "type": "boolean" },
+            "findings": { "type": "array", "items": { "type": "string" } },
+            "revised_draft": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": ["tool_name", "semantic_summary", "workflow_skill", "helper_scripts"],
+                "properties": {
+                    "tool_name": { "type": "string" },
+                    "semantic_summary": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                            "what_it_does",
+                            "required_inputs",
+                            "prerequisites",
+                            "side_effect_level",
+                            "success_signals",
+                            "failure_modes",
+                            "citations",
+                            "confidence"
+                        ],
+                        "properties": {
+                            "what_it_does": { "type": "string" },
+                            "required_inputs": { "type": "array", "items": { "type": "string" } },
+                            "prerequisites": { "type": "array", "items": { "type": "string" } },
+                            "side_effect_level": { "type": "string" },
+                            "success_signals": { "type": "array", "items": { "type": "string" } },
+                            "failure_modes": { "type": "array", "items": { "type": "string" } },
+                            "citations": { "type": "array", "items": { "type": "string" } },
+                            "confidence": { "type": "number" }
+                        }
+                    },
+                    "workflow_skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                            "id",
+                            "title",
+                            "goal",
+                            "when_to_use",
+                            "trigger_phrases",
+                            "origin_tools",
+                            "stop_and_ask",
+                            "native_steps",
+                            "verification",
+                            "return_contract",
+                            "confidence"
+                        ],
+                        "properties": {
+                            "id": { "type": "string" },
+                            "title": { "type": "string" },
+                            "goal": { "type": "string" },
+                            "when_to_use": { "type": "string" },
+                            "trigger_phrases": { "type": "array", "items": { "type": "string" } },
+                            "origin_tools": { "type": "array", "items": { "type": "string" } },
+                            "prerequisite_workflows": { "type": "array", "items": { "type": "string" } },
+                            "followup_workflows": { "type": "array", "items": { "type": "string" } },
+                            "required_context": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["name", "guidance", "required"],
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "guidance": { "type": "string" },
+                                        "required": { "type": "boolean" }
+                                    }
+                                }
+                            },
+                            "context_acquisition": { "type": "array", "items": { "type": "string" } },
+                            "branching_rules": { "type": "array", "items": { "type": "string" } },
+                            "stop_and_ask": { "type": "array", "items": { "type": "string" } },
+                            "native_steps": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["title", "command", "details"],
+                                    "properties": {
+                                        "title": { "type": "string" },
+                                        "command": { "type": "string" },
+                                        "details": { "type": ["string", "null"] }
+                                    }
+                                }
+                            },
+                            "verification": { "type": "array", "items": { "type": "string" } },
+                            "return_contract": { "type": "array", "items": { "type": "string" } },
+                            "guardrails": { "type": "array", "items": { "type": "string" } },
+                            "evidence": { "type": "array", "items": { "type": "string" } },
+                            "confidence": { "type": "number" }
+                        }
+                    },
+                    "helper_scripts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["relative_path", "body", "executable"],
+                            "properties": {
+                                "relative_path": { "type": "string" },
+                                "body": { "type": "string" },
+                                "executable": { "type": "boolean" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("review schema should serialize")
 }
 
 trait AgentBackend {

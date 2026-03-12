@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -5,10 +7,12 @@ use std::path::PathBuf;
 
 mod apply;
 mod backend;
+mod catalog;
 mod contract;
 mod diagnostics;
 mod dossier;
 mod inventory;
+mod pipeline;
 mod runtime;
 mod skillset;
 mod source;
@@ -17,6 +21,12 @@ pub use apply::{
     apply, apply_from_bundle, apply_from_dossier_path, apply_with_options, run_one_shot_v3,
 };
 pub use backend::backend_health_report;
+pub use catalog::{
+    CatalogProvider, CatalogProviderRecord, CatalogProviderStatus, CatalogServer,
+    CatalogSourceResolution, CatalogSourceResolutionStatus, CatalogStats, CatalogSyncOptions,
+    CatalogSyncResult, catalog_stats, catalog_sync, load_cached_catalog_sync_result,
+    load_catalog_sync_result,
+};
 pub use contract::{contract_test_bundle, contract_test_from_dossier_path};
 pub use diagnostics::verify;
 pub use dossier::{
@@ -24,6 +34,14 @@ pub use dossier::{
     write_dossier_bundle,
 };
 pub use inventory::{discover, inspect, plan};
+pub use pipeline::{
+    ArtifactIdentity, ArtifactKind, EvidenceBundle, HelperScript, ResolvedArtifact, ReviewFinding,
+    ReviewReport, RunArtifacts, RunOptions, RunReport, ServerConversionBundle,
+    SnapshotMaterialization, SnippetEvidence, SourceSnapshot, SynthesisReport, ToolConversionDraft,
+    ToolEvidencePack, ToolSemanticSummary, VerifyIssue, VerifyReport, build_evidence_bundle,
+    materialize_snapshot, resolve_artifact, review_conversion_bundle, run_pipeline,
+    synthesize_from_evidence, verify_conversion_bundle,
+};
 pub use skillset::build_from_bundle;
 
 const DOSSIER_FORMAT_VERSION: u32 = 6;

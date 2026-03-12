@@ -1,13 +1,20 @@
 mod support;
 
 use predicates::prelude::*;
-use std::path::Path;
+use serde_json::Value;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
 use std::time::Duration;
 use support::{
-    TestContext, count_backups, write_counting_mock_mcp_script, write_leaking_mock_mcp_script,
-    write_mock_claude_script, write_mock_codex_script, write_mock_codex_script_for,
-    write_mock_mcp_context_error_script, write_mock_mcp_id_schema_script,
-    write_mock_mcp_no_schema_script, write_mock_mcp_script, write_mock_mcp_session_defaults_script,
+    TestContext, count_backups, write_local_source_layout, write_mock_claude_script,
+    write_mock_codex_script, write_mock_codex_script_with_review_fix, write_mock_mcp_script,
 };
 
 fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<bool>) {
@@ -19,610 +26,434 @@ fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<
     );
 }
 
-fn write_admin_config(ctx: &TestContext, command: &Path) {
-    ctx.write_server_config("admin", command, Some("Admin mutations"), None);
+fn parse_json_output(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap()
+}
+
+fn artifact_path(value: &Value) -> PathBuf {
+    PathBuf::from(value["artifact_path"].as_str().unwrap())
+}
+
+struct StubRegistryServer {
+    base_url: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl StubRegistryServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        handle_registry_request(&mut stream);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            base_url: format!("http://{}", addr),
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for StubRegistryServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn handle_registry_request(stream: &mut TcpStream) {
+    let mut buffer = [0u8; 4096];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    let body = if path.starts_with("/official/servers") {
+        r#"{
+  "servers": [
+    {
+      "server": {
+        "name": "memory",
+        "title": "Memory",
+        "description": "Shared memory server",
+        "repository": { "url": "https://github.com/modelcontextprotocol/servers" },
+        "packages": [
+          {
+            "registryType": "npm",
+            "identifier": "@modelcontextprotocol/server-memory",
+            "version": "1.0.0"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": { "nextCursor": null }
+}"#
+    } else if path.starts_with("/smithery/servers") {
+        r#"{
+  "servers": [
+    {
+      "qualifiedName": "example/remote-only",
+      "displayName": "Remote Only",
+      "description": "Hosted remote server",
+      "namespace": "example",
+      "slug": "remote-only",
+      "remote": true
+    }
+  ],
+  "pagination": { "totalPages": 1 }
+}"#
+    } else {
+        r#"{"error":"not-found"}"#
+    };
+
+    let status = if body.contains("not-found") {
+        "404 Not Found"
+    } else {
+        "200 OK"
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
 }
 
 #[test]
-fn test_mcpsmith_root_help_hides_plan_and_uses_standalone_config_wording() {
+fn test_mcpsmith_root_help_lists_agentic_pipeline() {
     let ctx = TestContext::new();
 
     ctx.cmd()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("\n  plan").not())
+        .stdout(predicate::str::contains("mcpsmith run <server>"))
         .stdout(predicate::str::contains(
-            "config backend.preference when available",
+            "Every command is non-interactive.",
         ))
-        .stdout(predicate::str::contains("config convert.backend_preference").not());
+        .stdout(predicate::str::contains("discover").not());
 }
 
 #[test]
-fn test_mcpsmith_discover_help_scopes_backend_flags_without_probe_flags() {
-    let ctx = TestContext::new();
-
-    ctx.cmd()
-        .args(["discover", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--backend <BACKEND>"))
-        .stdout(predicate::str::contains("--backend-auto"))
-        .stdout(predicate::str::contains("--backend-health"))
-        .stdout(predicate::str::contains("--allow-side-effects").not())
-        .stdout(predicate::str::contains("--probe-timeout-seconds").not())
-        .stdout(predicate::str::contains("--probe-retries").not());
-}
-
-#[test]
-fn test_mcpsmith_discover_build_contract_apply() {
+fn test_mcpsmith_resolve_blocks_remote_only_servers() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let report_path = ctx.report_path();
-    let skills_dir = ctx.skills_dir();
+    ctx.write_remote_server_config("remote-demo", "https://example.com/mcp");
+
+    ctx.cmd()
+        .args(["resolve", "remote-demo", "--json", "--config"])
+        .arg(&config_path)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"blocked\": true"))
+        .stderr(predicate::str::contains("URL-backed"));
+}
+
+#[test]
+fn test_mcpsmith_staged_pipeline_accepts_prior_artifacts() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
     let mock_mcp = ctx.path("mock-mcp.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_local_source_layout(&ctx, "execute");
     write_mock_mcp_script(&mock_mcp, &["execute"]);
     write_mock_codex_script(&mock_codex);
     write_playwright_config(&ctx, &mock_mcp, Some(true));
 
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--json", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"server_gate\": \"ready\""));
-
-    ctx.cmd()
-        .args(["build", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["verify", "playwright", "--json", "--config"])
-        .arg(&config_path)
-        .args(["--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"));
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--report"])
-        .arg(&report_path)
-        .args(["--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"));
-
-    ctx.cmd()
-        .args(["apply", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--yes", "--json", "--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
-
-    let updated = std::fs::read_to_string(&config_path).unwrap();
-    let orchestrator_body =
-        std::fs::read_to_string(ctx.orchestrator_skill_path("playwright")).unwrap();
-    let workflow_body =
-        std::fs::read_to_string(ctx.tool_skill_path("playwright", "execute")).unwrap();
-    assert!(!updated.contains("playwright"));
-    assert!(ctx.orchestrator_skill_path("playwright").exists());
-    assert!(ctx.tool_skill_path("playwright", "execute").exists());
-    assert!(ctx.manifest_path("playwright").exists());
-    assert!(!skills_dir.join("playwright.md").exists());
-    assert!(!skills_dir.join("playwright--execute.md").exists());
-    assert!(!orchestrator_body.contains("mcp__"));
-    assert!(!workflow_body.contains("mcp__"));
-    assert!(!workflow_body.contains("maps to"));
-    assert!(workflow_body.contains("## Native Steps"));
-    assert!(report_path.exists());
-    assert_eq!(count_backups(&config_path), 1);
-}
-
-#[test]
-fn test_mcpsmith_apply_rolls_back_installed_skill_dirs_when_config_entry_is_missing() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let skills_dir = ctx.skills_dir();
-    let mock_mcp = ctx.path("mock-mcp.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_script(&mock_mcp, &["execute"]);
-    write_mock_codex_script(&mock_codex);
-    write_playwright_config(&ctx, &mock_mcp, Some(true));
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    std::fs::write(&config_path, r#"{ "mcpServers": {} }"#).unwrap();
-
-    ctx.cmd()
-        .args(["apply", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--yes", "--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "Rolled back generated skills to keep conversion atomic.",
-        ));
-
-    assert!(!ctx.orchestrator_skill_path("playwright").exists());
-    assert!(!ctx.tool_skill_path("playwright", "execute").exists());
-    assert_eq!(count_backups(&config_path), 0);
-}
-
-#[test]
-fn test_mcpsmith_build_rejects_blocked_dossier() {
-    let ctx = TestContext::new();
-    let dossier_path = ctx.dossier_path();
-    let skills_dir = ctx.skills_dir();
-    std::fs::write(
-        &dossier_path,
-        r#"{
-  "format_version": 5,
-  "generated_at": "2026-03-10T00:00:00Z",
-  "dossiers": [
-    {
-      "generated_at": "2026-03-10T00:00:00Z",
-      "format_version": 5,
-      "server": {
-        "id": "fixture:playwright",
-        "name": "playwright",
-        "source_label": "fixture",
-        "source_path": "/tmp/mcp.json",
-        "purpose": "Read-only browser helpers",
-        "command": "npx",
-        "args": ["-y", "@acme/playwright-mcp"],
-        "url": null,
-        "env_keys": [],
-        "declared_tool_count": 1,
-        "permission_hints": ["read-only"],
-        "inferred_permission": "read-only",
-        "recommendation": "replace-candidate",
-        "recommendation_reason": "read-only",
-        "source_grounding": {
-          "kind": "npm-package",
-          "evidence_level": "config-only",
-          "inspected": false
-        }
-      },
-      "runtime_tools": [
-        {
-          "name": "execute",
-          "description": "Execute action",
-          "input_schema": {
-            "type": "object",
-            "properties": {}
-          }
-        }
-      ],
-      "runtime_validations": [
-        {
-          "tool_name": "execute",
-          "contract_tests": [
-            {
-              "probe": "happy-path",
-              "expected": "Returns success.",
-              "method": "Run with valid input.",
-              "applicable": true
-            },
-            {
-              "probe": "invalid-input",
-              "expected": "Returns validation error.",
-              "method": "Run with invalid input.",
-              "applicable": true
-            },
-            {
-              "probe": "side-effect-safety",
-              "expected": "Skips destructive path.",
-              "method": "Do not execute side effects.",
-              "applicable": false
-            }
-          ],
-          "probe_inputs": {},
-          "probe_input_source": "synthesized"
-        }
-      ],
-      "workflow_skills": [
-        {
-          "id": "execute",
-          "title": "Execute workflow",
-          "goal": "Run the execute workflow without relying on the MCP server.",
-          "when_to_use": "Use this when you need to run the execute workflow with native commands.",
-          "trigger_phrases": ["run execute"],
-          "origin_tools": ["execute"],
-          "prerequisite_workflows": [],
-          "followup_workflows": [],
-          "required_context": [
-            {
-              "name": "query",
-              "guidance": "Collect the exact query before running the workflow.",
-              "required": true
-            }
-          ],
-          "context_acquisition": ["Ask for the missing query instead of guessing it."],
-          "branching_rules": ["If the query is missing, stop before running commands."],
-          "stop_and_ask": ["Stop if the query is ambiguous or could mutate state."],
-          "native_steps": [
-            {
-              "title": "Run execute",
-              "command": "printf '%s\\n' 'execute:$QUERY'",
-              "details": "Replace $QUERY with the exact query value."
-            }
-          ],
-          "verification": ["Confirm the command completed successfully."],
-          "return_contract": ["Return the command output and the exact query used."],
-          "guardrails": ["Do not invent query values."],
-          "evidence": ["runtime metadata"],
-          "confidence": 0.5
-        }
-      ],
-      "server_gate": "blocked",
-      "gate_reasons": ["Backend dossier generation failed; fallback-only draft output."],
-      "backend_used": "codex",
-      "backend_fallback_used": false,
-      "backend_diagnostics": []
-    }
-  ]
-}"#,
-    )
-    .unwrap();
-
-    ctx.cmd()
-        .args(["build", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "Cannot build standalone skills from blocked dossier",
-        ));
-}
-
-#[test]
-fn test_mcpsmith_discover_records_source_grounding_in_dossier() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let tool_root = ctx.path("local-tool");
-    let bin_dir = tool_root.join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let mock_mcp = bin_dir.join("mock-mcp.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_script(&mock_mcp, &["navigate"]);
-    write_mock_codex_script_for(&mock_codex, &["navigate"]);
-    std::fs::write(
-        tool_root.join("package.json"),
-        r#"{
-  "name": "@acme/local-mcp",
-  "version": "1.2.3",
-  "homepage": "https://example.com/local-mcp",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/acme/local-mcp"
-  }
-}"#,
-    )
-    .unwrap();
-
-    write_playwright_config(&ctx, &mock_mcp, None);
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--json", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    let dossier: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&dossier_path).unwrap()).unwrap();
-    let server = &dossier["dossiers"][0]["server"];
-    assert_eq!(server["source_grounding"]["kind"], "local-path");
-    assert_eq!(
-        server["source_grounding"]["package_name"],
-        "@acme/local-mcp"
+    let resolve = parse_json_output(
+        &ctx.cmd()
+            .args(["resolve", "playwright", "--json", "--config"])
+            .arg(&config_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
     );
-    assert_eq!(server["source_grounding"]["package_version"], "1.2.3");
+    let resolve_artifact = artifact_path(&resolve);
+
+    let snapshot = parse_json_output(
+        &ctx.cmd()
+            .args(["snapshot", "--json", "--from-resolve"])
+            .arg(&resolve_artifact)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let snapshot_artifact = artifact_path(&snapshot);
+
+    let evidence = parse_json_output(
+        &ctx.cmd()
+            .args(["evidence", "--json", "--from-snapshot"])
+            .arg(&snapshot_artifact)
+            .args(["--tool", "execute"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let evidence_artifact = artifact_path(&evidence);
     assert_eq!(
-        server["source_grounding"]["repository_url"],
-        "https://github.com/acme/local-mcp"
+        evidence["result"]["tool_evidence"][0]["tool_name"]
+            .as_str()
+            .unwrap(),
+        "execute"
     );
 
-    let evidence = dossier["dossiers"][0]["workflow_skills"][0]["evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|item| item.as_str())
-        .collect::<Vec<_>>();
-    assert!(evidence.contains(&"evidence-level: source-inspected"));
-    assert!(evidence.contains(&"source-package: @acme/local-mcp@1.2.3"));
-    assert!(evidence.contains(&"source-homepage: https://example.com/local-mcp"));
+    let synthesis = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["synthesize", "--json", "--from-evidence"])
+            .arg(&evidence_artifact)
+            .args(["--backend", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let synthesis_artifact = artifact_path(&synthesis);
+
+    let review = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["review", "--json", "--from-bundle"])
+            .arg(&synthesis_artifact)
+            .args(["--backend", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let review_artifact = artifact_path(&review);
+    assert!(review["result"]["approved"].as_bool().unwrap());
+
+    let verify = parse_json_output(
+        &ctx.cmd()
+            .args(["verify", "--json", "--from-bundle"])
+            .arg(&review_artifact)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert!(verify["result"]["passed"].as_bool().unwrap());
 }
 
 #[test]
-fn test_mcpsmith_one_shot_works_with_claude_only() {
+fn test_mcpsmith_bare_one_shot_dry_run_writes_preview_and_keeps_config() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
-    let skills_dir = ctx.skills_dir();
     let mock_mcp = ctx.path("mock-mcp.sh");
-    let mock_claude = ctx.path("mock-claude.sh");
+    let mock_claude = ctx.path("mock-claude.py");
+
+    write_local_source_layout(&ctx, "execute");
     write_mock_mcp_script(&mock_mcp, &["execute"]);
     write_mock_claude_script(&mock_claude);
     write_playwright_config(&ctx, &mock_mcp, Some(true));
 
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", ctx.path("missing-codex"))
-        .env("MCPSMITH_CLAUDE_COMMAND", &mock_claude)
-        .args(["playwright", "--json", "--config"])
-        .arg(&config_path)
-        .args(["--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"backend_used\": \"claude\""))
-        .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
+    let run = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CLAUDE_COMMAND", &mock_claude)
+            .env("MCPSMITH_CODEX_COMMAND", ctx.path("missing-codex"))
+            .args([
+                "playwright",
+                "--json",
+                "--dry-run",
+                "--backend",
+                "claude",
+                "--config",
+            ])
+            .arg(&config_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
 
-    let updated = std::fs::read_to_string(&config_path).unwrap();
-    let orchestrator_body =
-        std::fs::read_to_string(ctx.orchestrator_skill_path("playwright")).unwrap();
-    let workflow_body =
-        std::fs::read_to_string(ctx.tool_skill_path("playwright", "execute")).unwrap();
-    assert!(!updated.contains("playwright"));
-    assert!(ctx.orchestrator_skill_path("playwright").exists());
-    assert!(ctx.manifest_path("playwright").exists());
-    assert!(!orchestrator_body.contains("mcp__"));
-    assert!(!workflow_body.contains("mcp__"));
-    assert!(workflow_body.contains("## Native Steps"));
+    assert_eq!(run["status"].as_str().unwrap(), "dry-run");
+    let preview_dir = PathBuf::from(run["skills_dir"].as_str().unwrap());
+    assert!(preview_dir.exists());
+    assert!(preview_dir.join("playwright").join("SKILL.md").exists());
+    assert!(
+        preview_dir
+            .join("playwright--execute")
+            .join("SKILL.md")
+            .exists()
+    );
+
+    let updated = fs::read_to_string(&config_path).unwrap();
+    assert!(updated.contains("playwright"));
+    assert_eq!(count_backups(&config_path), 0);
 }
 
 #[test]
-fn test_mcpsmith_one_shot_reuses_initial_contract_gate() {
+fn test_mcpsmith_bare_one_shot_applies_skills_and_updates_config() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
     let skills_dir = ctx.skills_dir();
-    let mock_mcp = ctx.path("mock-mcp-counting.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    let spawn_log = ctx.path("mock-mcp-spawns.log");
-    write_counting_mock_mcp_script(&mock_mcp, &spawn_log, &["execute"]);
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
     write_mock_codex_script(&mock_codex);
     write_playwright_config(&ctx, &mock_mcp, Some(true));
 
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["playwright", "--json", "--config"])
-        .arg(&config_path)
-        .args(["--skills-dir"])
-        .arg(&skills_dir)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"mcp_config_updated\": true"));
-
-    let spawn_count = std::fs::read_to_string(&spawn_log).unwrap().lines().count();
-    assert_eq!(
-        spawn_count, 6,
-        "one-shot should avoid rerunning the full contract gate during apply"
+    let run = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["playwright", "--json", "--backend", "codex", "--config"])
+            .arg(&config_path)
+            .args(["--skills-dir"])
+            .arg(&skills_dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
     );
+
+    assert_eq!(run["status"].as_str().unwrap(), "applied");
+    assert!(ctx.orchestrator_skill_path("playwright").exists());
+    assert!(ctx.tool_skill_path("playwright", "execute").exists());
+    assert!(ctx.manifest_path("playwright").exists());
+
+    let updated = fs::read_to_string(&config_path).unwrap();
+    assert!(!updated.contains("playwright"));
+    assert_eq!(count_backups(&config_path), 1);
 }
 
 #[test]
-fn test_mcpsmith_discover_fails_cleanly_when_no_backend_installed() {
+fn test_mcpsmith_review_second_pass_applies_revision_before_verify() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
     let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex-review.py");
+
+    write_local_source_layout(&ctx, "execute");
     write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script_with_review_fix(&mock_codex);
     write_playwright_config(&ctx, &mock_mcp, Some(true));
 
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", ctx.path("missing-codex"))
-        .env("MCPSMITH_CLAUDE_COMMAND", ctx.path("missing-claude"))
-        .args(["discover", "playwright", "--config"])
-        .arg(&config_path)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "No supported backend is installed",
-        ));
-}
-
-#[test]
-fn test_mcpsmith_contract_test_blocks_on_schema_gap() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let mock_mcp = ctx.path("mock-mcp-no-schema.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_no_schema_script(&mock_mcp, "execute");
-    write_mock_codex_script_for(&mock_codex, &["execute"]);
-    write_playwright_config(&ctx, &mock_mcp, Some(true));
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": false"))
-        .stdout(predicate::str::contains("\"error_kind\": \"schema-gap\""));
-}
-
-#[test]
-fn test_mcpsmith_contract_test_accepts_synthesized_context_prereq_errors() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let mock_mcp = ctx.path("mock-mcp-context.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_context_error_script(&mock_mcp, "discover_projs");
-    write_mock_codex_script_for(&mock_codex, &["discover_projs"]);
-    write_playwright_config(&ctx, &mock_mcp, Some(true));
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"))
-        .stdout(predicate::str::contains("external prerequisite"))
-        .stdout(predicate::str::contains("\"tool\": \"discover_projs\""));
-}
-
-#[test]
-fn test_mcpsmith_contract_test_skips_side_effect_safety_for_session_tools() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let mock_mcp = ctx.path("mock-mcp-session-defaults.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_session_defaults_script(&mock_mcp, "session_set_defaults");
-    write_mock_codex_script_for(&mock_codex, &["session_set_defaults"]);
-    ctx.write_server_config(
-        "xcodebuildmcp",
-        &mock_mcp,
-        Some("Xcode simulator helpers"),
-        None,
+    let synthesis = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args([
+                "synthesize",
+                "playwright",
+                "--json",
+                "--backend",
+                "codex",
+                "--config",
+            ])
+            .arg(&config_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
     );
+    let synthesis_artifact = artifact_path(&synthesis);
 
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "xcodebuildmcp", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"))
-        .stdout(predicate::str::contains(
-            "Tool classified as non-destructive; side-effect probe safely skipped.",
-        ))
-        .stdout(predicate::str::contains(
-            "\"tool\": \"session_set_defaults\"",
-        ));
-}
-
-#[test]
-fn test_mcpsmith_contract_test_allows_side_effect_probe_with_flag() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let mock_mcp = ctx.path("mock-mcp-delete.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_mock_mcp_id_schema_script(&mock_mcp, "delete_item");
-    write_mock_codex_script_for(&mock_codex, &["delete_item"]);
-    write_admin_config(&ctx, &mock_mcp);
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "admin", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--allow-side-effects", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"));
-}
-
-#[test]
-fn test_mcpsmith_contract_test_reaps_descendant_mcp_processes() {
-    let ctx = TestContext::new();
-    let config_path = ctx.config_path();
-    let dossier_path = ctx.dossier_path();
-    let pid_log = ctx.path("leaked-mcp-pids.log");
-    std::fs::write(&pid_log, "").unwrap();
-    let mock_mcp = ctx.path("mock-mcp-leaking.sh");
-    let mock_codex = ctx.path("mock-codex.sh");
-    write_leaking_mock_mcp_script(&mock_mcp, &pid_log, &["execute"]);
-    write_mock_codex_script_for(&mock_codex, &["execute"]);
-    write_playwright_config(&ctx, &mock_mcp, Some(true));
-
-    ctx.cmd()
-        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
-        .args(["discover", "playwright", "--out"])
-        .arg(&dossier_path)
-        .args(["--config"])
-        .arg(&config_path)
-        .assert()
-        .success();
-
-    ctx.cmd()
-        .args(["contract-test", "--from-dossier"])
-        .arg(&dossier_path)
-        .args(["--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"passed\": true"));
-
-    std::thread::sleep(Duration::from_millis(200));
-
-    let pid_text = std::fs::read_to_string(&pid_log).unwrap();
-    let leaked = pid_text
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .any(|pid| {
-            std::process::Command::new("sh")
-                .args(["-c", &format!("kill -0 {pid}")])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        });
-
-    assert!(
-        !leaked,
-        "contract-test should reap descendant MCP processes before returning"
+    let review = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["review", "--json", "--from-bundle"])
+            .arg(&synthesis_artifact)
+            .args(["--backend", "codex"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
     );
+    let review_artifact = artifact_path(&review);
+    assert!(review["result"]["approved"].as_bool().unwrap());
+    assert_eq!(review["result"]["findings"].as_array().unwrap().len(), 1);
+
+    let verify = parse_json_output(
+        &ctx.cmd()
+            .args(["verify", "--json", "--from-bundle"])
+            .arg(&review_artifact)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert!(verify["result"]["passed"].as_bool().unwrap());
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_and_stats_use_machine_readable_endpoints() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    let sync = parse_json_output(
+        &ctx.cmd()
+            .env(
+                "MCPSMITH_OFFICIAL_REGISTRY_BASE_URL",
+                format!("{}/official", registry.base_url),
+            )
+            .env(
+                "MCPSMITH_SMITHERY_REGISTRY_BASE_URL",
+                format!("{}/smithery", registry.base_url),
+            )
+            .args([
+                "catalog",
+                "sync",
+                "--json",
+                "--provider",
+                "official",
+                "--provider",
+                "smithery",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let sync_artifact = artifact_path(&sync);
+    assert_eq!(
+        sync["result"]["stats"]["unique_servers"].as_u64().unwrap(),
+        2
+    );
+    assert_eq!(
+        sync["result"]["stats"]["source_resolvable"]
+            .as_u64()
+            .unwrap(),
+        1
+    );
+    assert_eq!(sync["result"]["stats"]["remote_only"].as_u64().unwrap(), 1);
+
+    let stats = parse_json_output(
+        &ctx.cmd()
+            .args(["catalog", "stats", "--json", "--from"])
+            .arg(&sync_artifact)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert_eq!(stats["result"]["unique_servers"].as_u64().unwrap(), 2);
+    assert_eq!(stats["result"]["source_resolvable"].as_u64().unwrap(), 1);
 }

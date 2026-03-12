@@ -2,9 +2,14 @@
 
 ## What mcpsmith does
 
-`mcpsmith` converts MCP servers into standalone skill packs. The current flow discovers live MCP tools with `tools/list`, probes real behavior with `tools/call`, builds dossier-driven skills, contract-tests them, and can atomically write skills while removing the MCP config entry.
+`mcpsmith` converts MCP servers into standalone skill packs from real source
+artifacts. The current flow resolves the installed MCP, snapshots the exact
+source, builds tool evidence, synthesizes grounded skills, runs a second review
+pass, verifies the skill artifacts, and can atomically write skills while
+removing the MCP config entry.
 
-All work for this plan stays in `mcpsmith`. `distill` is historical context only and must not be modified from this repo workflow.
+All work for this plan stays in `mcpsmith`. `distill` is historical context
+only and must not be modified from this repo workflow.
 
 ## Preferred change flow
 
@@ -18,11 +23,14 @@ All work for this plan stays in `mcpsmith`. `distill` is historical context only
 
 - Overview: `cargo run --quiet --`
 - One-shot conversion: `cargo run --quiet -- <server>`
-- Discover dossier JSON: `cargo run --quiet -- discover <server|--all> --out dossier.json`
-- Build skills from dossier: `cargo run --quiet -- build --from-dossier dossier.json`
-- Contract-test dossier: `cargo run --quiet -- contract-test --from-dossier dossier.json`
-- Apply passing dossier: `cargo run --quiet -- apply --from-dossier dossier.json --yes`
-- Diagnostics: `cargo run --quiet -- list`, `cargo run --quiet -- inspect <server>`, `cargo run --quiet -- plan <server>`, `cargo run --quiet -- verify <server>`
+- Full one-shot with explicit subcommand: `cargo run --quiet -- run <server>`
+- Catalog: `cargo run --quiet -- catalog sync`, `cargo run --quiet -- catalog stats`
+- Staged resolve: `cargo run --quiet -- resolve <server> --json`
+- Staged snapshot: `cargo run --quiet -- snapshot <server|--from-resolve artifact.json> --json`
+- Staged evidence: `cargo run --quiet -- evidence <server|--from-snapshot artifact.json> --json`
+- Staged synthesis: `cargo run --quiet -- synthesize <server|--from-evidence artifact.json> --json`
+- Staged review: `cargo run --quiet -- review <server|--from-bundle artifact.json> --json`
+- Staged verify: `cargo run --quiet -- verify <server|--from-bundle artifact.json> --json`
 - Help: `cargo run --quiet -- --help`, `cargo run --quiet -- <command> --help`
 
 ## Isolated runtime rules
@@ -35,11 +43,10 @@ All work for this plan stays in `mcpsmith`. `distill` is historical context only
 - Default config path is `~/.mcpsmith/config.yaml`.
 - Default installed skill path is `~/.agents/skills/`.
 
-## Backend and probe behavior
+## Backend behavior
 
-- Backend selection today is: explicit `--backend`, then config `backend.preference`, then auto-detect installed backends in `codex` then `claude` order. Legacy `convert.*` keys are input-only compatibility.
-- Use `--backend-health` when debugging backend availability.
-- Runtime probe controls are `--allow-side-effects`, `--probe-timeout-seconds <N>`, and `--probe-retries <N>`.
+- Backend selection today is: explicit `--backend`, then config `backend.preference`, then auto-detect installed backends in `codex` then `claude` order.
+- Use `--backend-auto` when you want the CLI to fall back automatically.
 - Test and local backend overrides use `MCPSMITH_CODEX_COMMAND` and `MCPSMITH_CLAUDE_COMMAND`.
 
 ## cli-verify workflow
@@ -68,9 +75,9 @@ APP_CMD='cd /Users/anicolae/code/mcpsmith && cargo run --quiet --'
 Minimum visual proofs for CLI changes:
 
 - `mcpsmith --help`
-- `mcpsmith discover --help`
+- `mcpsmith resolve --help`
 - one real error path
-- one stepwise success flow
+- one staged success flow
 - one one-shot success flow
 
 Every screenshot must be paired with pane capture output.
@@ -84,7 +91,7 @@ Every screenshot must be paired with pane capture output.
 
 ## Live-MCP verification expectations
 
-- Discovery and verification work should use real runtime `tools/list` introspection.
-- Contract testing should exercise real runtime `tools/call` probes, with side effects disabled unless explicitly allowed.
+- Runtime discovery should use real `tools/list` introspection.
+- Live smoke is confidence evidence, not a hard gate for skill generation.
 - Keep live MCP validation isolated with temp `HOME`, temp config files, and temp skills output.
-- Preserve dossier JSON and contract-test reports when they help explain failures or confirm behavior.
+- Preserve staged artifacts and run reports when they help explain failures or confirm behavior.

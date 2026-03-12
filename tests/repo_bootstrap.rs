@@ -15,11 +15,10 @@ fn read_repo_file(path: &str) -> String {
 fn repo_bootstrap_files_exist() {
     for path in [
         "AGENTS.md",
+        "NEXT-STEPS.md",
         "llms.txt",
         "README.md",
         "Makefile",
-        "docs/architecture.md",
-        "docs/release-checklist.md",
         "examples/sample-mcp-config.json",
         "examples/sample-dossier.json",
         "examples/sample-contract-report.json",
@@ -63,10 +62,11 @@ fn llms_summary_documents_agent_entrypoints() {
     for needle in [
         "## Preferred for AI agents (non-interactive)",
         "One-shot:",
-        "Stepwise:",
+        "Dry-run one-shot:",
+        "Staged flow:",
         "Config path: `~/.mcpsmith/config.yaml`",
         "Installed skills path: `~/.agents/skills/`",
-        "Retained diagnostics for the standalone surface: `list`, `inspect`, `verify`",
+        "One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify",
     ] {
         assert!(llms.contains(needle), "llms.txt missing {needle}");
     }
@@ -81,11 +81,10 @@ fn readme_covers_product_docs_and_examples() {
         "## What mcpsmith does",
         "## How it works",
         "## One-shot flow",
-        "## Stepwise flow",
-        "## Config shape",
+        "## Staged flow",
+        "## Catalog and source resolution",
         "## Backend behavior",
-        "## Runtime probe semantics",
-        "## Output skill-pack layout",
+        "## Output and artifacts",
         "## Examples",
         "## Troubleshooting",
         "## Isolated verification",
@@ -95,36 +94,19 @@ fn readme_covers_product_docs_and_examples() {
 }
 
 #[test]
-fn architecture_and_release_docs_cover_required_topics() {
-    let architecture = read_repo_file("docs/architecture.md");
+fn next_steps_documents_the_only_active_follow_up_scope() {
+    let next_steps = read_repo_file("NEXT-STEPS.md");
     for needle in [
-        "# mcpsmith architecture",
-        "## Config discovery",
-        "## Runtime introspection",
-        "## Backend selection",
-        "## Source grounding",
-        "## Build",
-        "## Contract-test",
-        "## Apply",
+        "# mcpsmith Next Steps",
+        "This is the only active coordination file",
+        "## 1. Remove dead legacy flow",
+        "## 2. Keep deterministic tool location as the default",
+        "## 3. Add a tiny fallback only for low-confidence cases",
+        "## 4. Expand the surface area only for real blockers",
     ] {
         assert!(
-            architecture.contains(needle),
-            "docs/architecture.md missing {needle}"
-        );
-    }
-
-    let release = read_repo_file("docs/release-checklist.md");
-    for needle in [
-        "# Release checklist",
-        "Version bump",
-        "Release notes",
-        "CI green",
-        "Live smoke green",
-        "Publish readiness",
-    ] {
-        assert!(
-            release.contains(needle),
-            "docs/release-checklist.md missing {needle}"
+            next_steps.contains(needle),
+            "NEXT-STEPS.md missing {needle}"
         );
     }
 }

@@ -1,32 +1,36 @@
 # mcpsmith
-> CLI for converting MCP servers into standalone skill packs with live discovery, probing, contract tests, and atomic apply.
+> CLI for converting MCP servers into source-grounded, agent-native skill packs.
 
 ## Preferred for AI agents (non-interactive)
-- Before behavior changes, add or update tests first, then run `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`.
+- Before behavior changes, add or update tests first, then run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test`.
 - One-shot: `HOME="$TMPDIR/mcpsmith-home" cargo run --quiet -- <server> --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
-- Stepwise: `HOME="$TMPDIR/mcpsmith-home" cargo run --quiet -- discover <server> --out "$TMPDIR/dossier.json" --config "$TMPDIR/mcp.json"`
-- Continue stepwise with `cargo run --quiet -- build --from-dossier "$TMPDIR/dossier.json" --skills-dir "$TMPDIR/skills"`, `cargo run --quiet -- contract-test --from-dossier "$TMPDIR/dossier.json"`, and `cargo run --quiet -- apply --from-dossier "$TMPDIR/dossier.json" --yes --skills-dir "$TMPDIR/skills"`.
-- For CLI/help/output changes, verify in Ghostty with `$cli-verify` and keep session state under `.codex-runtime/`.
+- Dry-run one-shot: `HOME="$TMPDIR/mcpsmith-home" cargo run --quiet -- <server> --dry-run --json --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
+- Staged flow: `resolve`, `snapshot`, `evidence`, `synthesize`, `review`, and `verify`, chaining artifact files through `--from-resolve`, `--from-snapshot`, `--from-evidence`, and `--from-bundle`.
+- For CLI/help/output changes, verify in Ghostty with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) and keep session state under `.codex-runtime/`.
 
 ## Core commands
 - `cargo run --quiet -- --help`
-- `cargo run --quiet -- discover --help`
-- `cargo run --quiet -- list --config "$TMPDIR/mcp.json"`
-- `cargo run --quiet -- inspect <server> --config "$TMPDIR/mcp.json"`
-- `cargo run --quiet -- verify <server> --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
+- `cargo run --quiet -- catalog sync`
+- `cargo run --quiet -- resolve <server> --json --config "$TMPDIR/mcp.json"`
+- `cargo run --quiet -- snapshot --json --from-resolve <artifact.json>`
+- `cargo run --quiet -- evidence --json --from-snapshot <artifact.json>`
+- `cargo run --quiet -- synthesize --json --from-evidence <artifact.json> --backend codex`
+- `cargo run --quiet -- review --json --from-bundle <artifact.json> --backend codex`
+- `cargo run --quiet -- verify --json --from-bundle <artifact.json>`
+- `cargo run --quiet -- run <server> --dry-run --json --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
 
 ## Canonical references
 - `README.md`
-- `PLAN.md`
+- `NEXT-STEPS.md`
 - `AGENTS.md`
 - `src/main.rs`
+- `src/commands/agentic.rs`
 - `tests/cli.rs`
 
 ## Runtime data
 - Config path: `~/.mcpsmith/config.yaml`
 - Installed skills path: `~/.agents/skills/`
 - Backend selection: explicit `--backend`, then config `backend.preference`, then auto-detect `codex`, then `claude`
-- Probe controls: `--allow-side-effects`, `--probe-timeout-seconds <N>`, `--probe-retries <N>`
-- Live probing uses runtime `tools/list` introspection and `tools/call` checks
-- Retained diagnostics for the standalone surface: `list`, `inspect`, `verify`
+- One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify
+- Live smoke is optional confidence evidence, not a hard conversion gate
 - Test/local backend overrides: `MCPSMITH_CODEX_COMMAND`, `MCPSMITH_CLAUDE_COMMAND`

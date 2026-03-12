@@ -5,29 +5,26 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 const LONG_ABOUT: &str = "\
-Convert MCP servers into standalone skill packs with an atomic runtime gate.
+Convert MCP servers into source-grounded, agent-native skills.
 
-Default one-shot flow:
+Primary one-shot flow:
   mcpsmith <server>
+  mcpsmith run <server>
 
-Stepwise flow:
-  mcpsmith discover <server|--all> --out dossier.json
-  mcpsmith build --from-dossier dossier.json
-  mcpsmith contract-test --from-dossier dossier.json
-  mcpsmith apply --from-dossier dossier.json --yes
+Staged flow:
+  mcpsmith catalog sync
+  mcpsmith resolve <server>
+  mcpsmith snapshot <server> | --from-resolve <path>
+  mcpsmith evidence <server> | --from-snapshot <path>
+  mcpsmith synthesize <server>
+  mcpsmith review <server>
+  mcpsmith verify <server>
 
-Backend selection is backend-agnostic:
-  1) explicit --backend if provided
-  2) config backend.preference when available
-  3) auto-detect installed backend (codex, then claude)
-
-Use --backend, --backend-auto, and --backend-health for one-shot conversion or discover.
-Use --allow-side-effects, --probe-timeout-seconds, and --probe-retries to control runtime probes.
-Use --config <path> to include extra MCP config files.
+Every command is non-interactive. Use --json for machine-readable output and --dry-run to avoid mutating installed skills or MCP config.
 ";
 
 #[derive(Parser)]
-#[command(name = "mcpsmith", version, about = "Convert MCP servers into skill packs", long_about = LONG_ABOUT)]
+#[command(name = "mcpsmith", version, about = "Convert MCP servers into source-grounded skills", long_about = LONG_ABOUT)]
 struct Cli {
     /// Server id (source:name) or unique server name for one-shot conversion
     server: Option<String>,
@@ -46,140 +43,127 @@ struct Cli {
     /// Enable backend auto-detect/fallback mode
     #[arg(long, requires = "server")]
     backend_auto: bool,
-    /// Print backend availability diagnostics
+    /// Run the full pipeline without mutating installed skills or MCP config
     #[arg(long, requires = "server")]
-    backend_health: bool,
-    /// Allow executing explicit side-effectful probes during contract testing
-    #[arg(long, requires = "server")]
-    allow_side_effects: bool,
-    /// Runtime probe timeout in seconds
-    #[arg(long = "probe-timeout-seconds", value_name = "N", requires = "server")]
-    probe_timeout_seconds: Option<u64>,
-    /// Number of retries for failed runtime probes
-    #[arg(long = "probe-retries", value_name = "N", requires = "server")]
-    probe_retries: Option<u32>,
+    dry_run: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Discover runtime tools and generate backend-neutral dossiers
-    Discover {
-        /// Server id (source:name) or unique server name
-        server: Option<String>,
-        /// Discover all servers from config sources
-        #[arg(long, conflicts_with = "server")]
-        all: bool,
-        /// Emit machine-readable JSON output
+    /// Sync and normalize public MCP catalog providers
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommands,
+    },
+    /// Resolve the exact source artifact for one installed MCP
+    Resolve {
+        server: String,
         #[arg(long)]
         json: bool,
-        /// Optional path to write dossier JSON
-        #[arg(long = "out", value_name = "PATH")]
-        out: Option<PathBuf>,
-        /// Additional MCP config file paths to inspect
         #[arg(long = "config", value_name = "PATH")]
         config: Vec<PathBuf>,
-        /// Force backend selection to codex or claude
+    },
+    /// Materialize a local source snapshot for one installed MCP
+    Snapshot {
+        server: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "from-resolve", value_name = "PATH")]
+        from_resolve: Option<PathBuf>,
+        #[arg(long = "config", value_name = "PATH")]
+        config: Vec<PathBuf>,
+    },
+    /// Build a per-tool evidence bundle from runtime tools plus source snapshot
+    Evidence {
+        server: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "tool", value_name = "NAME")]
+        tool: Option<String>,
+        #[arg(long = "from-snapshot", value_name = "PATH")]
+        from_snapshot: Option<PathBuf>,
+        #[arg(long = "config", value_name = "PATH")]
+        config: Vec<PathBuf>,
+    },
+    /// Synthesize grounded skill drafts from evidence
+    Synthesize {
+        server: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "tool", value_name = "NAME")]
+        tool: Option<String>,
+        #[arg(long = "from-evidence", value_name = "PATH")]
+        from_evidence: Option<PathBuf>,
+        #[arg(long = "config", value_name = "PATH")]
+        config: Vec<PathBuf>,
         #[arg(long, value_parser = ["codex", "claude"])]
         backend: Option<String>,
-        /// Enable backend auto-detect/fallback mode
         #[arg(long)]
         backend_auto: bool,
-        /// Print backend availability diagnostics
-        #[arg(long)]
-        backend_health: bool,
     },
-    /// Build skill files from an existing dossier JSON
-    Build {
-        /// Input dossier JSON path
-        #[arg(long = "from-dossier", value_name = "PATH")]
-        from_dossier: PathBuf,
-        /// Override output directory for generated skills
-        #[arg(long = "skills-dir", value_name = "PATH")]
-        skills_dir: Option<PathBuf>,
-        /// Emit machine-readable JSON output
+    /// Review synthesized skills with a second agent pass
+    Review {
+        server: Option<String>,
         #[arg(long)]
         json: bool,
-    },
-    /// Run contract tests from an existing dossier JSON
-    ContractTest {
-        /// Input dossier JSON path
-        #[arg(long = "from-dossier", value_name = "PATH")]
-        from_dossier: PathBuf,
-        /// Optional path to write contract-test report JSON
-        #[arg(long = "report", value_name = "PATH")]
-        report: Option<PathBuf>,
-        /// Emit machine-readable JSON output
-        #[arg(long)]
-        json: bool,
-        /// Allow executing explicit side-effectful probes during contract testing
-        #[arg(long)]
-        allow_side_effects: bool,
-        /// Runtime probe timeout in seconds
-        #[arg(long = "probe-timeout-seconds", value_name = "N")]
-        probe_timeout_seconds: Option<u64>,
-        /// Number of retries for failed runtime probes
-        #[arg(long = "probe-retries", value_name = "N")]
-        probe_retries: Option<u32>,
-    },
-    /// Apply a fully passing dossier: write skills and remove MCP config entry
-    Apply {
-        /// Input dossier JSON path
-        #[arg(long = "from-dossier", value_name = "PATH")]
-        from_dossier: PathBuf,
-        /// Required confirmation because this mutates MCP config
-        #[arg(long)]
-        yes: bool,
-        /// Override output directory for generated skills
-        #[arg(long = "skills-dir", value_name = "PATH")]
-        skills_dir: Option<PathBuf>,
-        /// Emit machine-readable JSON output
-        #[arg(long)]
-        json: bool,
-        /// Allow executing explicit side-effectful probes during contract testing
-        #[arg(long)]
-        allow_side_effects: bool,
-        /// Runtime probe timeout in seconds
-        #[arg(long = "probe-timeout-seconds", value_name = "N")]
-        probe_timeout_seconds: Option<u64>,
-        /// Number of retries for failed runtime probes
-        #[arg(long = "probe-retries", value_name = "N")]
-        probe_retries: Option<u32>,
-    },
-    /// List discovered MCP servers
-    List {
-        /// Emit machine-readable JSON output
-        #[arg(long)]
-        json: bool,
-        /// Additional MCP config file paths to inspect
+        #[arg(long = "from-bundle", value_name = "PATH")]
+        from_bundle: Option<PathBuf>,
         #[arg(long = "config", value_name = "PATH")]
         config: Vec<PathBuf>,
-    },
-    /// Inspect one MCP server by id or by unique name
-    Inspect {
-        /// Server id (source:name) or unique server name
-        server: String,
-        /// Emit machine-readable JSON output
+        #[arg(long, value_parser = ["codex", "claude"])]
+        backend: Option<String>,
         #[arg(long)]
-        json: bool,
-        /// Additional MCP config file paths to inspect
-        #[arg(long = "config", value_name = "PATH")]
-        config: Vec<PathBuf>,
+        backend_auto: bool,
     },
-    /// Verify parity coverage between generated skills and live MCP tool list
+    /// Verify generated skills for format, grounding, and references
     Verify {
-        /// Server id (source:name) or unique server name
-        server: String,
-        /// Emit machine-readable JSON output
+        server: Option<String>,
         #[arg(long)]
         json: bool,
-        /// Additional MCP config file paths to inspect
+        #[arg(long = "from-bundle", value_name = "PATH")]
+        from_bundle: Option<PathBuf>,
         #[arg(long = "config", value_name = "PATH")]
         config: Vec<PathBuf>,
-        /// Override skills directory for generated files
+        #[arg(long, value_parser = ["codex", "claude"])]
+        backend: Option<String>,
+        #[arg(long)]
+        backend_auto: bool,
+    },
+    /// Run the full source-grounded pipeline end-to-end
+    Run {
+        server: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "config", value_name = "PATH")]
+        config: Vec<PathBuf>,
         #[arg(long = "skills-dir", value_name = "PATH")]
         skills_dir: Option<PathBuf>,
+        #[arg(long, value_parser = ["codex", "claude"])]
+        backend: Option<String>,
+        #[arg(long)]
+        backend_auto: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CatalogCommands {
+    /// Fetch provider data and write a normalized catalog snapshot
+    Sync {
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "provider", value_name = "NAME")]
+        provider: Vec<String>,
+    },
+    /// Report catalog statistics from a saved snapshot or a fresh sync
+    Stats {
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "from", value_name = "PATH")]
+        from: Option<PathBuf>,
     },
 }
 
@@ -188,108 +172,139 @@ fn main() -> anyhow::Result<()> {
     let app_config = config::Config::load().unwrap_or_default();
 
     match cli.command {
-        Some(Commands::Discover {
+        Some(Commands::Catalog { command }) => match command {
+            CatalogCommands::Sync { json, provider } => {
+                commands::agentic::run_catalog_sync_cmd(json, &provider)?;
+            }
+            CatalogCommands::Stats { json, from } => {
+                commands::agentic::run_catalog_stats_cmd(json, from.as_deref())?;
+            }
+        },
+        Some(Commands::Resolve {
             server,
-            all,
             json,
-            out,
+            config,
+        }) => {
+            commands::agentic::run_resolve_cmd(&server, json, &config)?;
+        }
+        Some(Commands::Snapshot {
+            server,
+            json,
+            from_resolve,
+            config,
+        }) => {
+            commands::agentic::run_snapshot_cmd(
+                server.as_deref(),
+                from_resolve.as_deref(),
+                json,
+                &config,
+            )?;
+        }
+        Some(Commands::Evidence {
+            server,
+            json,
+            tool,
+            from_snapshot,
+            config,
+        }) => {
+            commands::agentic::run_evidence_cmd(
+                server.as_deref(),
+                from_snapshot.as_deref(),
+                tool.as_deref(),
+                json,
+                &config,
+            )?;
+        }
+        Some(Commands::Synthesize {
+            server,
+            json,
+            tool,
+            from_evidence,
             config,
             backend,
             backend_auto,
-            backend_health,
         }) => {
-            commands::convert::run_discover_v3(
+            commands::agentic::run_synthesize_cmd(
                 server.as_deref(),
-                all,
+                from_evidence.as_deref(),
+                tool.as_deref(),
                 json,
-                out,
                 &config,
                 backend.as_deref(),
                 backend_auto,
-                backend_health,
                 &app_config,
             )?;
         }
-        Some(Commands::Build {
-            from_dossier,
-            skills_dir,
-            json,
-        }) => {
-            commands::convert::run_build_v3(&from_dossier, skills_dir, json)?;
-        }
-        Some(Commands::ContractTest {
-            from_dossier,
-            report,
-            json,
-            allow_side_effects,
-            probe_timeout_seconds,
-            probe_retries,
-        }) => {
-            commands::convert::run_contract_test_v3(
-                &from_dossier,
-                report.as_deref(),
-                json,
-                allow_side_effects,
-                probe_timeout_seconds,
-                probe_retries,
-                &app_config,
-            )?;
-        }
-        Some(Commands::Apply {
-            from_dossier,
-            yes,
-            skills_dir,
-            json,
-            allow_side_effects,
-            probe_timeout_seconds,
-            probe_retries,
-        }) => {
-            commands::convert::run_apply_v3(
-                &from_dossier,
-                yes,
-                skills_dir,
-                json,
-                allow_side_effects,
-                probe_timeout_seconds,
-                probe_retries,
-                &app_config,
-            )?;
-        }
-        Some(Commands::List { json, config }) => {
-            commands::convert::run_list(json, &config)?;
-        }
-        Some(Commands::Inspect {
+        Some(Commands::Review {
             server,
             json,
+            from_bundle,
             config,
+            backend,
+            backend_auto,
         }) => {
-            commands::convert::run_inspect(&server, json, &config)?;
+            commands::agentic::run_review_cmd(
+                server.as_deref(),
+                from_bundle.as_deref(),
+                json,
+                &config,
+                backend.as_deref(),
+                backend_auto,
+                &app_config,
+            )?;
         }
         Some(Commands::Verify {
             server,
             json,
+            from_bundle,
+            config,
+            backend,
+            backend_auto,
+        }) => {
+            commands::agentic::run_verify_cmd(
+                server.as_deref(),
+                from_bundle.as_deref(),
+                json,
+                &config,
+                backend.as_deref(),
+                backend_auto,
+                &app_config,
+            )?;
+        }
+        Some(Commands::Run {
+            server,
+            json,
             config,
             skills_dir,
+            backend,
+            backend_auto,
+            dry_run,
         }) => {
-            commands::convert::run_verify(&server, json, &config, skills_dir)?;
+            commands::agentic::run_run_cmd(
+                &server,
+                json,
+                &config,
+                skills_dir,
+                backend.as_deref(),
+                backend_auto,
+                dry_run,
+                &app_config,
+            )?;
         }
         None => {
             if let Some(server) = cli.server {
-                commands::convert::run_one_shot_v3(
+                commands::agentic::run_run_cmd(
                     &server,
                     cli.json,
                     &cli.config,
                     cli.skills_dir,
                     cli.backend.as_deref(),
                     cli.backend_auto,
-                    cli.backend_health,
-                    cli.allow_side_effects,
-                    cli.probe_timeout_seconds,
-                    cli.probe_retries,
+                    cli.dry_run,
                     &app_config,
                 )?;
             } else {
-                commands::convert::run_overview_v3(&cli.config)?;
+                commands::agentic::run_overview(cli.json)?;
             }
         }
     }

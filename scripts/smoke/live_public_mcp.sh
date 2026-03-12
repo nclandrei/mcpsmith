@@ -9,8 +9,8 @@ usage() {
   cat <<'EOF'
 Usage: scripts/smoke/live_public_mcp.sh --server memory|chrome-devtools|all|xcodebuildmcp [--run-dir PATH]
 
-Runs live public-MCP smoke verification with isolated HOME, config, skills, and
-captured artifacts under .codex-runtime.
+Runs isolated live MCP smoke verification with dry-run and applied one-shot
+flows, storing captured artifacts under .codex-runtime.
 EOF
 }
 
@@ -52,25 +52,16 @@ RUN_ROOT="$(smoke_prepare_run_root "$RUN_ROOT")"
 
 run_live_target() {
   local target_name="$1"
-  local fixture_path="$2"
-  local command="$3"
-  local description="$4"
-  local read_only="$5"
-  shift 5
+  local command="$2"
+  local description="$3"
+  local read_only="$4"
+  shift 4
   local args=("$@")
 
-  local target_root="$RUN_ROOT/$target_name"
-  local verify_root="$target_root/verify"
-  local apply_root="$target_root/apply"
-  local verify_dossier
-  local apply_dossier
-  local discover_path
+  local dry_run_root="$RUN_ROOT/$target_name/dry-run"
+  local apply_root="$RUN_ROOT/$target_name/apply"
 
-  verify_dossier="$verify_root/live-smoke.dossier.json"
-  apply_dossier="$apply_root/live-smoke.dossier.json"
-  discover_path="$verify_root/discover.dossier.json"
-
-  smoke_init_sandbox "$verify_root"
+  smoke_init_sandbox "$dry_run_root"
   smoke_write_server_config \
     "$SMOKE_CONFIG" \
     "$target_name" \
@@ -78,21 +69,13 @@ run_live_target() {
     "$description" \
     "$read_only" \
     "${args[@]}"
-  smoke_render_live_dossier "$fixture_path" "$SMOKE_CONFIG" "$verify_dossier"
 
-  smoke_capture_mcpsmith list list --json --config "$SMOKE_CONFIG"
-  smoke_capture_mcpsmith inspect inspect "$target_name" --json --config "$SMOKE_CONFIG"
-  smoke_capture_mcpsmith discover discover "$target_name" --json --out "$discover_path" --config "$SMOKE_CONFIG"
-  smoke_capture_mcpsmith contract contract-test --from-dossier "$verify_dossier" --report "$SMOKE_REPORT" --json --probe-timeout-seconds 30 --probe-retries 1
-  smoke_capture_mcpsmith build build --from-dossier "$verify_dossier" --skills-dir "$SMOKE_SKILLS_DIR" --json
-  smoke_capture_mcpsmith verify verify "$target_name" --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
-
-  smoke_assert_file "$discover_path"
-  smoke_assert_file "$SMOKE_REPORT"
-  smoke_assert_contains "$SMOKE_LOG_DIR/contract.stdout" "\"passed\": true"
-  smoke_assert_contains "$SMOKE_LOG_DIR/verify.stdout" "\"passed\": true"
+  smoke_capture_mcpsmith dry-run "$target_name" --json --dry-run --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
+  smoke_assert_contains "$SMOKE_LOG_DIR/dry-run.stdout" "\"status\": \"dry-run\""
+  smoke_assert_contains "$SMOKE_LOG_DIR/dry-run.stdout" "\"review\""
+  smoke_assert_contains "$SMOKE_LOG_DIR/dry-run.stdout" "\"verify\""
   smoke_assert_file "$SMOKE_SKILLS_DIR/$target_name/SKILL.md"
-  smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$verify_root/skills-tree.txt"
+  smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$dry_run_root/skills-tree.txt"
 
   smoke_init_sandbox "$apply_root"
   smoke_write_server_config \
@@ -102,10 +85,10 @@ run_live_target() {
     "$description" \
     "$read_only" \
     "${args[@]}"
-  smoke_render_live_dossier "$fixture_path" "$SMOKE_CONFIG" "$apply_dossier"
 
-  smoke_capture_mcpsmith apply apply --from-dossier "$apply_dossier" --yes --json --skills-dir "$SMOKE_SKILLS_DIR" --probe-timeout-seconds 30 --probe-retries 1
-  smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"applied\": true"
+  smoke_capture_mcpsmith apply "$target_name" --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
+  smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"status\": \"applied\""
+  smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"mcp_config_updated\": true"
   smoke_assert_not_contains "$SMOKE_CONFIG" "\"$target_name\""
   smoke_assert_file "$SMOKE_SKILLS_DIR/$target_name/SKILL.md"
   smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$apply_root/skills-tree.txt"
@@ -126,7 +109,6 @@ run_xcode_optional() {
 
   run_live_target \
     "xcodebuildmcp" \
-    "$(smoke_repo_root)/tests/fixtures/live/xcodebuildmcp-smoke.dossier.json" \
     "npx" \
     "Xcode build, simulator, and iOS debug workflows" \
     "" \
@@ -138,7 +120,6 @@ run_xcode_optional() {
 if [[ "$SERVER" == "memory" || "$SERVER" == "all" ]]; then
   run_live_target \
     "memory" \
-    "$(smoke_repo_root)/tests/fixtures/live/memory-smoke.dossier.json" \
     "npx" \
     "Memory and knowledge graph workflows" \
     true \
@@ -149,7 +130,6 @@ fi
 if [[ "$SERVER" == "chrome-devtools" || "$SERVER" == "all" ]]; then
   run_live_target \
     "chrome-devtools" \
-    "$(smoke_repo_root)/tests/fixtures/live/chrome-devtools-smoke.dossier.json" \
     "npx" \
     "Browser inspection and debugging workflows" \
     "" \

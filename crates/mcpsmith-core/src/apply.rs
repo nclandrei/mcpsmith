@@ -386,7 +386,7 @@ fn apply_from_bundle_inner(
     })
 }
 
-fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[PathBuf]) {
+pub(crate) fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[PathBuf]) {
     for path in tool_paths {
         let _ = fs::remove_file(path);
         if let Some(parent) = path.parent() {
@@ -400,7 +400,10 @@ fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[PathBuf]) {
     }
 }
 
-fn remove_server_from_config(path: &Path, server_name: &str) -> Result<(Option<PathBuf>, bool)> {
+pub(crate) fn remove_server_from_config(
+    path: &Path,
+    server_name: &str,
+) -> Result<(Option<PathBuf>, bool)> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config {}", path.display()))?;
 

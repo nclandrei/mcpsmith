@@ -52,8 +52,6 @@ smoke_init_sandbox "$RUN_ROOT/stepwise"
 STEP_HOME="$SMOKE_HOME"
 STEP_CONFIG="$SMOKE_CONFIG"
 STEP_SKILLS_DIR="$SMOKE_SKILLS_DIR"
-STEP_DOSSIER="$SMOKE_DOSSIER"
-STEP_REPORT="$SMOKE_REPORT"
 STEP_MOCK_MCP="$RUN_ROOT/stepwise/mock-mcp.sh"
 STEP_MOCK_CODEX="$RUN_ROOT/stepwise/mock-codex.sh"
 smoke_write_mock_mcp_script "$STEP_MOCK_MCP" execute
@@ -64,6 +62,19 @@ smoke_write_server_config \
   "$STEP_MOCK_MCP" \
   "Read-only browser helpers" \
   true
+
+export MCPSMITH_CODEX_COMMAND="$STEP_MOCK_CODEX"
+smoke_capture_mcpsmith resolve resolve playwright --json --config "$STEP_CONFIG"
+STEP_RESOLVE_ARTIFACT="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/resolve.stdout")"
+smoke_capture_mcpsmith snapshot snapshot --json --from-resolve "$STEP_RESOLVE_ARTIFACT"
+STEP_SNAPSHOT_ARTIFACT="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/snapshot.stdout")"
+smoke_capture_mcpsmith evidence evidence --json --from-snapshot "$STEP_SNAPSHOT_ARTIFACT"
+STEP_EVIDENCE_ARTIFACT="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/evidence.stdout")"
+smoke_capture_mcpsmith synthesize synthesize --json --from-evidence "$STEP_EVIDENCE_ARTIFACT" --backend codex
+STEP_SYNTHESIS_ARTIFACT="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/synthesize.stdout")"
+smoke_capture_mcpsmith review review --json --from-bundle "$STEP_SYNTHESIS_ARTIFACT" --backend codex
+STEP_REVIEW_ARTIFACT="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/review.stdout")"
+unset MCPSMITH_CODEX_COMMAND
 
 smoke_init_sandbox "$RUN_ROOT/one-shot"
 ONE_HOME="$SMOKE_HOME"
@@ -102,43 +113,28 @@ run_visual_step \
   "Usage: mcpsmith [OPTIONS] [SERVER] [COMMAND]"
 
 run_visual_step \
-  "help-discover" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- discover --help" \
-  "Usage: mcpsmith discover [OPTIONS] [SERVER]"
+  "help-resolve" \
+  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- resolve --help" \
+  "Usage: mcpsmith resolve [OPTIONS] <SERVER>"
 
 run_visual_step \
-  "stepwise-discover" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" MCPSMITH_CODEX_COMMAND=\"$STEP_MOCK_CODEX\" cargo run --quiet -- discover playwright --json --out \"$STEP_DOSSIER\" --config \"$STEP_CONFIG\"" \
-  "\"server_gate\": \"ready\""
+  "error-snapshot-missing-input" \
+  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- snapshot --json" \
+  "snapshot requires <server> or --from-resolve"
 
 run_visual_step \
-  "stepwise-build" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- build --from-dossier \"$STEP_DOSSIER\" --skills-dir \"$STEP_SKILLS_DIR\" --json" \
-  "\"orchestrator_skill_path\""
-
-run_visual_step \
-  "error-apply-missing-yes" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- apply --from-dossier \"$STEP_DOSSIER\" --skills-dir \"$STEP_SKILLS_DIR\"" \
-  "apply requires --yes"
+  "stepwise-resolve" \
+  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- resolve playwright --json --config \"$STEP_CONFIG\"" \
+  "\"blocked\": false"
 
 run_visual_step \
   "stepwise-verify" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- verify playwright --json --config \"$STEP_CONFIG\" --skills-dir \"$STEP_SKILLS_DIR\"" \
+  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- verify --json --from-bundle \"$STEP_REVIEW_ARTIFACT\"" \
   "\"passed\": true"
-
-run_visual_step \
-  "stepwise-contract" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- contract-test --from-dossier \"$STEP_DOSSIER\" --report \"$STEP_REPORT\" --json" \
-  "\"passed\": true"
-
-run_visual_step \
-  "stepwise-apply" \
-  "cd \"$REPO_ROOT\" && HOME=\"$STEP_HOME\" cargo run --quiet -- apply --from-dossier \"$STEP_DOSSIER\" --yes --json --skills-dir \"$STEP_SKILLS_DIR\"" \
-  "\"mcp_config_updated\": true"
 
 run_visual_step \
   "one-shot-success" \
-  "cd \"$REPO_ROOT\" && HOME=\"$ONE_HOME\" MCPSMITH_CODEX_COMMAND=\"$ONE_MOCK_CODEX\" cargo run --quiet -- playwright --json --config \"$ONE_CONFIG\" --skills-dir \"$ONE_SKILLS_DIR\"" \
-  "\"mcp_config_updated\": true"
+  "cd \"$REPO_ROOT\" && HOME=\"$ONE_HOME\" MCPSMITH_CODEX_COMMAND=\"$ONE_MOCK_CODEX\" cargo run --quiet -- playwright --json --backend codex --config \"$ONE_CONFIG\" --skills-dir \"$ONE_SKILLS_DIR\"" \
+  "\"status\": \"applied\""
 
 smoke_print_artifacts "$RUN_ROOT"

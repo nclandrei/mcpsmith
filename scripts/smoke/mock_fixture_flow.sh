@@ -53,33 +53,28 @@ smoke_write_server_config \
 
 export MCPSMITH_CODEX_COMMAND="$stepwise_mock_codex"
 
-smoke_capture_mcpsmith list list --json --config "$SMOKE_CONFIG"
-smoke_assert_contains "$SMOKE_LOG_DIR/list.stdout" "\"name\": \"playwright\""
+smoke_capture_mcpsmith resolve resolve playwright --json --config "$SMOKE_CONFIG"
+resolve_artifact="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/resolve.stdout")"
+smoke_assert_contains "$SMOKE_LOG_DIR/resolve.stdout" "\"blocked\": false"
 
-smoke_capture_mcpsmith inspect inspect playwright --json --config "$SMOKE_CONFIG"
-smoke_assert_contains "$SMOKE_LOG_DIR/inspect.stdout" "\"id\": \"custom-1:playwright\""
+smoke_capture_mcpsmith snapshot snapshot --json --from-resolve "$resolve_artifact"
+snapshot_artifact="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/snapshot.stdout")"
+smoke_assert_contains "$SMOKE_LOG_DIR/snapshot.stdout" "\"source_root\""
 
-smoke_capture_mcpsmith discover discover playwright --json --out "$SMOKE_DOSSIER" --config "$SMOKE_CONFIG"
-smoke_assert_file "$SMOKE_DOSSIER"
-smoke_assert_contains "$SMOKE_LOG_DIR/discover.stdout" "\"server_gate\": \"ready\""
+smoke_capture_mcpsmith evidence evidence --json --from-snapshot "$snapshot_artifact"
+evidence_artifact="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/evidence.stdout")"
+smoke_assert_contains "$SMOKE_LOG_DIR/evidence.stdout" "\"tool_evidence\""
 
-smoke_capture_mcpsmith build build --from-dossier "$SMOKE_DOSSIER" --skills-dir "$SMOKE_SKILLS_DIR" --json
-smoke_assert_file "$SMOKE_SKILLS_DIR/playwright/SKILL.md"
-smoke_assert_file "$SMOKE_SKILLS_DIR/playwright--execute/SKILL.md"
-smoke_assert_file "$SMOKE_SKILLS_DIR/playwright/.mcpsmith/manifest.json"
-smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$stepwise_root/build-skills-tree.txt"
+smoke_capture_mcpsmith synthesize synthesize --json --from-evidence "$evidence_artifact" --backend codex
+synthesis_artifact="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/synthesize.stdout")"
+smoke_assert_contains "$SMOKE_LOG_DIR/synthesize.stdout" "\"blocked\": false"
 
-smoke_capture_mcpsmith verify verify playwright --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
+smoke_capture_mcpsmith review review --json --from-bundle "$synthesis_artifact" --backend codex
+review_artifact="$(smoke_json_artifact_path "$SMOKE_LOG_DIR/review.stdout")"
+smoke_assert_contains "$SMOKE_LOG_DIR/review.stdout" "\"approved\": true"
+
+smoke_capture_mcpsmith verify verify --json --from-bundle "$review_artifact"
 smoke_assert_contains "$SMOKE_LOG_DIR/verify.stdout" "\"passed\": true"
-
-smoke_capture_mcpsmith contract contract-test --from-dossier "$SMOKE_DOSSIER" --report "$SMOKE_REPORT" --json
-smoke_assert_file "$SMOKE_REPORT"
-smoke_assert_contains "$SMOKE_LOG_DIR/contract.stdout" "\"passed\": true"
-
-smoke_capture_mcpsmith apply apply --from-dossier "$SMOKE_DOSSIER" --yes --json --skills-dir "$SMOKE_SKILLS_DIR"
-smoke_assert_contains "$SMOKE_LOG_DIR/apply.stdout" "\"mcp_config_updated\": true"
-smoke_assert_not_contains "$SMOKE_CONFIG" "\"playwright\""
-smoke_save_skills_tree "$SMOKE_SKILLS_DIR" "$stepwise_root/apply-skills-tree.txt"
 
 smoke_init_sandbox "$oneshot_root"
 oneshot_mock_mcp="$oneshot_root/mock-mcp.sh"
@@ -95,8 +90,8 @@ smoke_write_server_config \
 
 export MCPSMITH_CODEX_COMMAND="$oneshot_mock_codex"
 
-smoke_capture_mcpsmith one-shot playwright --json --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
-smoke_assert_contains "$SMOKE_LOG_DIR/one-shot.stdout" "\"backend_used\": \"codex\""
+smoke_capture_mcpsmith one-shot playwright --json --backend codex --config "$SMOKE_CONFIG" --skills-dir "$SMOKE_SKILLS_DIR"
+smoke_assert_contains "$SMOKE_LOG_DIR/one-shot.stdout" "\"status\": \"applied\""
 smoke_assert_contains "$SMOKE_LOG_DIR/one-shot.stdout" "\"mcp_config_updated\": true"
 smoke_assert_not_contains "$SMOKE_CONFIG" "\"playwright\""
 smoke_assert_file "$SMOKE_SKILLS_DIR/playwright/SKILL.md"
