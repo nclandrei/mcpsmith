@@ -58,6 +58,30 @@ smoke_prepare_run_root() {
   printf '%s\n' "$run_root"
 }
 
+smoke_detect_codex_source_home() {
+  if [[ -n "${MCPSMITH_CODEX_HOME:-}" ]]; then
+    printf '%s\n' "$MCPSMITH_CODEX_HOME"
+    return
+  fi
+  if [[ -n "${CODEX_HOME:-}" ]]; then
+    printf '%s\n' "$CODEX_HOME"
+    return
+  fi
+  if [[ -d "${HOME}/.codex" ]]; then
+    printf '%s\n' "${HOME}/.codex"
+  fi
+}
+
+smoke_detect_claude_source_home() {
+  if [[ -n "${MCPSMITH_CLAUDE_HOME:-}" ]]; then
+    printf '%s\n' "$MCPSMITH_CLAUDE_HOME"
+    return
+  fi
+  if [[ -f "${HOME}/.claude.json" || -d "${HOME}/.claude" ]]; then
+    printf '%s\n' "${HOME}"
+  fi
+}
+
 smoke_init_sandbox() {
   local root
   root="$(smoke_abs_path "$1")"
@@ -69,6 +93,8 @@ smoke_init_sandbox() {
   SMOKE_DOSSIER="$root/dossier.json"
   SMOKE_REPORT="$root/contract-report.json"
   SMOKE_LOG_DIR="$root/logs"
+  SMOKE_CODEX_SOURCE_HOME="${SMOKE_CODEX_SOURCE_HOME:-$(smoke_detect_codex_source_home)}"
+  SMOKE_CLAUDE_SOURCE_HOME="${SMOKE_CLAUDE_SOURCE_HOME:-$(smoke_detect_claude_source_home)}"
 }
 
 smoke_capture_mcpsmith() {
@@ -80,6 +106,12 @@ smoke_capture_mcpsmith() {
   smoke_note "HOME=$SMOKE_HOME cargo run --quiet -- $*"
   (
     cd "$(smoke_repo_root)"
+    if [[ -n "${SMOKE_CODEX_SOURCE_HOME:-}" ]]; then
+      export MCPSMITH_CODEX_HOME="$SMOKE_CODEX_SOURCE_HOME"
+    fi
+    if [[ -n "${SMOKE_CLAUDE_SOURCE_HOME:-}" ]]; then
+      export MCPSMITH_CLAUDE_HOME="$SMOKE_CLAUDE_SOURCE_HOME"
+    fi
     HOME="$SMOKE_HOME" cargo run --quiet -- "$@"
   ) >"$stdout" 2>"$stderr"
 }
@@ -94,6 +126,12 @@ smoke_capture_mcpsmith_expect_fail() {
   set +e
   (
     cd "$(smoke_repo_root)"
+    if [[ -n "${SMOKE_CODEX_SOURCE_HOME:-}" ]]; then
+      export MCPSMITH_CODEX_HOME="$SMOKE_CODEX_SOURCE_HOME"
+    fi
+    if [[ -n "${SMOKE_CLAUDE_SOURCE_HOME:-}" ]]; then
+      export MCPSMITH_CLAUDE_HOME="$SMOKE_CLAUDE_SOURCE_HOME"
+    fi
     HOME="$SMOKE_HOME" cargo run --quiet -- "$@"
   ) >"$stdout" 2>"$stderr"
   local status=$?

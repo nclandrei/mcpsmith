@@ -756,7 +756,9 @@ struct ClaudeBackend {
 #[derive(Debug)]
 struct PreparedBackendHome {
     _tempdir: Option<TempDir>,
+    #[cfg_attr(not(test), allow(dead_code))]
     home_path: PathBuf,
+    env_overrides: Vec<(String, PathBuf)>,
 }
 
 impl AgentBackend for ClaudeBackend {
@@ -1193,7 +1195,9 @@ fn extract_claude_json_payload(stdout: &str) -> Result<String> {
 
 fn apply_backend_home(command: &mut Command, backend_home: Option<&PreparedBackendHome>) {
     if let Some(home) = backend_home {
-        command.env("HOME", &home.home_path);
+        for (key, value) in &home.env_overrides {
+            command.env(key, value);
+        }
     }
 }
 
@@ -1212,46 +1216,31 @@ fn prepare_backend_home(backend: ConvertBackendName) -> Result<Option<PreparedBa
     match backend {
         ConvertBackendName::Codex => prepare_codex_backend_home(),
         ConvertBackendName::Claude => Ok(backend_home_override(ConvertBackendName::Claude).map(
-            |home| PreparedBackendHome {
-                _tempdir: None,
-                home_path: PathBuf::from(home),
+            |home| {
+                let home_path = PathBuf::from(&home);
+                PreparedBackendHome {
+                    _tempdir: None,
+                    home_path: home_path.clone(),
+                    env_overrides: vec![("HOME".to_string(), home_path)],
+                }
             },
         )),
     }
 }
 
 fn prepare_codex_backend_home() -> Result<Option<PreparedBackendHome>> {
-    let source_home = backend_home_override(ConvertBackendName::Codex)
-        .map(PathBuf::from)
-        .or_else(current_home_path);
-    let Some(source_home) = source_home else {
+    let Some(source_codex_dir) = resolve_codex_source_dir() else {
         return Ok(None);
     };
 
-    let auth_source = source_home.join(".codex").join("auth.json");
-    if !auth_source.is_file() {
-        return Ok(None);
-    }
-
     let tempdir = tempfile::tempdir().context("Failed to create isolated Codex home")?;
-    let codex_dir = tempdir.path().join(".codex");
-    fs::create_dir_all(&codex_dir)
-        .with_context(|| format!("Failed to create {}", codex_dir.display()))?;
-    let auth_dest = codex_dir.join("auth.json");
-    fs::copy(&auth_source, &auth_dest).with_context(|| {
-        format!(
-            "Failed to copy Codex auth from {} to {}",
-            auth_source.display(),
-            auth_dest.display()
-        )
-    })?;
+    let isolated_path = tempdir.path().to_path_buf();
+    copy_codex_control_plane(&source_codex_dir, &isolated_path)?;
 
     Ok(Some(PreparedBackendHome {
         _tempdir: Some(tempdir),
-        home_path: codex_dir
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/")),
+        home_path: isolated_path.clone(),
+        env_overrides: vec![("CODEX_HOME".to_string(), isolated_path)],
     }))
 }
 
@@ -1261,6 +1250,104 @@ fn current_home_path() -> Option<PathBuf> {
         .map(|home| home.trim().to_string())
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+}
+
+fn resolve_codex_source_dir() -> Option<PathBuf> {
+    let mut candidates = vec![];
+    if let Some(path) = backend_home_override(ConvertBackendName::Codex).map(PathBuf::from) {
+        candidates.push(path);
+    }
+    if let Some(path) = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        candidates.push(path);
+    }
+    if let Some(path) = current_home_path() {
+        candidates.push(path);
+    }
+
+    for candidate in candidates {
+        if let Some(path) = normalize_codex_source_dir(&candidate) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn normalize_codex_source_dir(candidate: &Path) -> Option<PathBuf> {
+    let direct_auth = candidate.join("auth.json");
+    if direct_auth.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+
+    let nested = candidate.join(".codex");
+    if nested.join("auth.json").is_file() {
+        return Some(nested);
+    }
+
+    None
+}
+fn copy_codex_control_plane(source_root: &Path, destination_root: &Path) -> Result<()> {
+    for entry in [
+        "auth.json",
+        "config.toml",
+        "AGENTS.md",
+        "rules",
+        "skills",
+        "vendor_imports",
+    ] {
+        copy_control_plane_path(&source_root.join(entry), &destination_root.join(entry))?;
+    }
+    Ok(())
+}
+
+fn copy_control_plane_path(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to stat Codex control-plane path {}",
+                    source.display()
+                )
+            });
+        }
+    };
+
+    if metadata.is_dir() {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("Failed to create {}", destination.display()))?;
+        for entry in
+            fs::read_dir(source).with_context(|| format!("Failed to read {}", source.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("Failed to read entry under {}", source.display()))?;
+            copy_control_plane_path(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if metadata.file_type().is_symlink() {
+        let target = fs::canonicalize(source)
+            .with_context(|| format!("Failed to resolve symlink {}", source.display()))?;
+        return copy_control_plane_path(&target, destination);
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "Failed to copy Codex control-plane file from {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn extract_embedded_json(text: &str) -> Option<String> {
@@ -1632,29 +1719,62 @@ mod tests {
     }
 
     #[test]
-    fn prepare_backend_home_for_codex_copies_auth_without_config() {
+    fn prepare_backend_home_for_codex_supports_codex_home_override_and_preserves_control_plane() {
         let _guard = backend_env_lock().lock().unwrap();
-        let source_home = tempfile::tempdir().expect("source home tempdir");
-        let source_codex_dir = source_home.path().join(".codex");
-        fs::create_dir_all(&source_codex_dir).expect("create source codex dir");
-        fs::write(source_codex_dir.join("auth.json"), "{\"token\":\"abc\"}").expect("write auth");
-        fs::write(source_codex_dir.join("config.toml"), "mcp = true").expect("write config");
+        let source_codex_dir = tempfile::tempdir().expect("source codex home tempdir");
+        fs::write(
+            source_codex_dir.path().join("auth.json"),
+            "{\"token\":\"abc\"}",
+        )
+        .expect("write auth");
+        fs::write(
+            source_codex_dir.path().join("config.toml"),
+            "model = \"gpt-5.4\"",
+        )
+        .expect("write config");
+        fs::create_dir_all(source_codex_dir.path().join("skills")).expect("create skills dir");
+        fs::write(
+            source_codex_dir.path().join("skills").join("demo.txt"),
+            "skill body",
+        )
+        .expect("write skill");
 
         unsafe {
-            std::env::set_var("MCPSMITH_CODEX_HOME", source_home.path());
+            std::env::set_var("MCPSMITH_CODEX_HOME", source_codex_dir.path());
         }
 
         let prepared = prepare_backend_home(ConvertBackendName::Codex)
             .expect("prepare backend home")
             .expect("isolated backend home");
 
-        let isolated_codex_dir = prepared.home_path.join(".codex");
-        assert_ne!(prepared.home_path, source_home.path());
+        assert_ne!(prepared.home_path, source_codex_dir.path());
         assert_eq!(
-            fs::read_to_string(isolated_codex_dir.join("auth.json")).expect("read copied auth"),
+            fs::read_to_string(prepared.home_path.join("auth.json")).expect("read copied auth"),
             "{\"token\":\"abc\"}"
         );
-        assert!(!isolated_codex_dir.join("config.toml").exists());
+        assert_eq!(
+            fs::read_to_string(prepared.home_path.join("config.toml")).expect("read copied config"),
+            "model = \"gpt-5.4\""
+        );
+        assert_eq!(
+            fs::read_to_string(prepared.home_path.join("skills").join("demo.txt"))
+                .expect("read copied skill"),
+            "skill body"
+        );
+
+        let mut command = Command::new("env");
+        apply_backend_home(&mut command, Some(&prepared));
+        let applied_envs = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            applied_envs
+                .get(std::ffi::OsStr::new("CODEX_HOME"))
+                .map(|value| PathBuf::from(value.clone())),
+            Some(prepared.home_path.clone())
+        );
+        assert!(!applied_envs.contains_key(std::ffi::OsStr::new("HOME")));
 
         unsafe {
             std::env::remove_var("MCPSMITH_CODEX_HOME");
