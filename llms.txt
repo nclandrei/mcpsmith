@@ -9,6 +9,8 @@
 - For CLI/help/output changes, verify in Ghostty with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) and keep session state under `.codex-runtime/`.
 - Default catalog scope: official, smithery
 - Low-confidence mapper fallback: enabled only when deterministic evidence is weak
+- Homebrew tap: `nclandrei/homebrew-tap`
+- Release workflow: `.github/workflows/release.yml`
 
 ## Core commands
 - `cargo run --quiet -- --help`
@@ -26,6 +28,7 @@
 - `README.md`
 - `AGENTS.md`
 - `llms.txt`
+- `.github/workflows/release.yml`
 - `src/main.rs`
 - `src/commands/agentic.rs`
 - `crates/mcpsmith-core/src/pipeline.rs`
@@ -37,5 +40,6 @@
 - Backend selection: explicit `--backend`, then config `backend.preference`, then auto-detect `codex`, then `claude`
 - One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify
 - Deterministic evidence: registration, handler, tests/docs, and confidence are recorded per tool
+- Installed-binary smoke test: `./scripts/smoke/smoke-test-installed-mcpsmith.sh`
 - Live smoke is optional confidence evidence, not a hard conversion gate
 - Test/local backend overrides: `MCPSMITH_CODEX_COMMAND`, `MCPSMITH_CLAUDE_COMMAND`

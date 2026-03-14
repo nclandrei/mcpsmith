@@ -114,3 +114,11 @@ Every screenshot must be paired with pane capture output.
 - Keep live MCP validation isolated with temp `HOME`, temp config files, and temp skills output.
 - Preserve staged artifacts and run reports when they help explain failures or confirm behavior.
 - For catalog verification, remember the default scope is only `official` and `smithery`.
+
+## Release workflow
+
+- `Release` workflow runs on push to `main` and on `workflow_dispatch`.
+- Successful runs publish GitHub release artifacts, publish `mcpsmith-core` and `mcpsmith` to crates.io, and update `nclandrei/homebrew-tap`.
+- The workflow auto-creates the `v<version>` tag from `Cargo.toml`; do not push release tags manually.
+- When changing packaging or release logic, run `./scripts/smoke/smoke-test-installed-mcpsmith.sh <binary-or-tarball>` locally against a built artifact.
+- Required GitHub Actions secrets are `CARGO_REGISTRY_TOKEN` and `HOMEBREW_TAP_TOKEN`.

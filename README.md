@@ -16,6 +16,17 @@ This repo is the standalone product. `distill` is historical context only.
 - Uses deterministic tool evidence first, with a narrow mapper fallback only for low-confidence tools.
 - Installs generated skills under `~/.agents/skills/` by default.
 
+## Installation
+
+```bash
+# Homebrew
+brew tap nclandrei/tap
+brew install mcpsmith
+
+# crates.io
+cargo install mcpsmith
+```
+
 ## How it works
 
 1. Find the MCP in local config and resolve its exact artifact identity.
@@ -204,6 +215,35 @@ Sample fixtures live under [`examples/`](examples):
 - [`examples/sample-run-report.json`](examples/sample-run-report.json)
 - [`examples/sample-skill-pack-tree.txt`](examples/sample-skill-pack-tree.txt)
 
+## Release Automation
+
+Pushing to `main` triggers the release workflow. When the version in
+`Cargo.toml` has not been released yet, the workflow will:
+
+- publish release artifacts to GitHub Releases
+- publish `mcpsmith-core` and then `mcpsmith` to crates.io
+- update the Homebrew formula in `nclandrei/homebrew-tap`
+
+The workflow creates the `v<version>` tag automatically. You do not need to
+push tags manually. If a non-draft GitHub release for the current version
+already exists, automatic `push` runs exit without rebuilding artifacts. For an
+intentional retry of the current version, use GitHub Actions `workflow_dispatch`
+on the `Release` workflow.
+
+Required GitHub Actions secrets:
+
+- `CARGO_REGISTRY_TOKEN`: crates.io API token with publish access for
+  `mcpsmith-core` and `mcpsmith`
+- `HOMEBREW_TAP_TOKEN`: GitHub token with push access to
+  `nclandrei/homebrew-tap`
+
+Release process:
+
+```bash
+# bump Cargo.toml versions first when needed
+git push origin main
+```
+
 ## Troubleshooting
 
 - No servers resolved: pass `--config "$TMPDIR/mcp.json"` and confirm the file
@@ -233,6 +273,7 @@ cargo test --workspace
 
 Smoke helpers in this repo:
 
+- `./scripts/smoke/smoke-test-installed-mcpsmith.sh`
 - `./scripts/smoke/mock_fixture_flow.sh`
 - `./scripts/smoke/live_public_mcp.sh --server memory`
 - `./scripts/smoke/live_public_mcp.sh --server chrome-devtools`

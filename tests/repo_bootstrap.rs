@@ -18,17 +18,20 @@ fn repo_bootstrap_files_exist() {
         "llms.txt",
         "README.md",
         "Makefile",
+        "dist-workspace.toml",
         "examples/sample-mcp-config.json",
         "examples/sample-review.json",
         "examples/sample-run-report.json",
         "examples/sample-skill-pack-tree.txt",
         "scripts/local-checks.sh",
         "scripts/smoke/common.sh",
+        "scripts/smoke/smoke-test-installed-mcpsmith.sh",
         "scripts/smoke/mock_fixture_flow.sh",
         "scripts/smoke/live_public_mcp.sh",
         "scripts/smoke/cli_verify_smoke.sh",
         ".github/workflows/ci.yml",
         ".github/workflows/live-smoke.yml",
+        ".github/workflows/release.yml",
         "tests/fixtures/live/memory-smoke.review.json",
         "tests/fixtures/live/chrome-devtools-smoke.review.json",
         "tests/fixtures/live/xcodebuildmcp-smoke.review.json",
@@ -49,6 +52,7 @@ fn agents_guide_documents_repo_workflow() {
         "## cli-verify workflow",
         "## jj expectations",
         "## Live-MCP verification expectations",
+        "## Release workflow",
         "Add or update tests first for behavior changes.",
         "There is no standing roadmap file in the repo.",
     ] {
@@ -69,6 +73,8 @@ fn llms_summary_documents_agent_entrypoints() {
         "Installed skills path: `~/.agents/skills/`",
         "Default catalog scope: official, smithery",
         "Low-confidence mapper fallback: enabled only when deterministic evidence is weak",
+        "Homebrew tap: `nclandrei/homebrew-tap`",
+        "Release workflow: `.github/workflows/release.yml`",
         "One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify",
     ] {
         assert!(llms.contains(needle), "llms.txt missing {needle}");
@@ -90,6 +96,7 @@ fn readme_covers_product_docs_and_examples() {
         "## Backend behavior",
         "## Output and artifacts",
         "## Examples",
+        "## Release Automation",
         "## Troubleshooting",
         "## Isolated verification",
     ] {
@@ -131,7 +138,7 @@ fn repo_has_no_standing_next_steps_file() {
 }
 
 #[test]
-fn ci_workflows_cover_local_checks_and_live_smoke() {
+fn ci_workflows_cover_local_checks_live_smoke_and_release() {
     let ci = read_repo_file(".github/workflows/ci.yml");
     for needle in [
         "cargo fmt --all --check",
@@ -156,6 +163,21 @@ fn ci_workflows_cover_local_checks_and_live_smoke() {
             ".github/workflows/live-smoke.yml missing {needle}"
         );
     }
+
+    let release = read_repo_file(".github/workflows/release.yml");
+    for needle in [
+        "workflow_dispatch:",
+        "cargo-dist",
+        "publish-homebrew",
+        "publish-crates",
+        "scripts/smoke/smoke-test-installed-mcpsmith.sh",
+        "gh release edit",
+    ] {
+        assert!(
+            release.contains(needle),
+            ".github/workflows/release.yml missing {needle}"
+        );
+    }
 }
 
 #[test]
@@ -168,6 +190,10 @@ fn cargo_manifests_include_release_metadata() {
         "keywords = ",
         "categories = ",
         "mcpsmith-core = { version = ",
+        "[profile.dist]",
+        "[package.metadata.dist]",
+        "installers = [\"shell\", \"homebrew\"]",
+        "tap = \"nclandrei/homebrew-tap\"",
     ] {
         assert!(
             root_manifest.contains(needle),
@@ -186,6 +212,20 @@ fn cargo_manifests_include_release_metadata() {
         assert!(
             core_manifest.contains(needle),
             "crates/mcpsmith-core/Cargo.toml missing {needle}"
+        );
+    }
+
+    let dist_workspace = read_repo_file("dist-workspace.toml");
+    for needle in [
+        "cargo-dist-version = ",
+        "ci = \"github\"",
+        "installers = [\"shell\", \"homebrew\"]",
+        "tap = \"nclandrei/homebrew-tap\"",
+        "publish-jobs = [\"homebrew\"]",
+    ] {
+        assert!(
+            dist_workspace.contains(needle),
+            "dist-workspace.toml missing {needle}"
         );
     }
 }
@@ -208,6 +248,7 @@ fn local_checks_script_is_executable() {
     for path in [
         "scripts/local-checks.sh",
         "scripts/smoke/common.sh",
+        "scripts/smoke/smoke-test-installed-mcpsmith.sh",
         "scripts/smoke/mock_fixture_flow.sh",
         "scripts/smoke/live_public_mcp.sh",
         "scripts/smoke/cli_verify_smoke.sh",
