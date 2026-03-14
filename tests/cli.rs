@@ -679,3 +679,43 @@ fn test_mcpsmith_catalog_sync_and_stats_use_machine_readable_endpoints() {
     assert_eq!(stats["result"]["unique_servers"].as_u64().unwrap(), 2);
     assert_eq!(stats["result"]["source_resolvable"].as_u64().unwrap(), 1);
 }
+
+#[test]
+fn test_mcpsmith_catalog_sync_defaults_to_official_and_smithery_only() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    let sync = parse_json_output(
+        &ctx.cmd()
+            .env(
+                "MCPSMITH_OFFICIAL_REGISTRY_BASE_URL",
+                format!("{}/official", registry.base_url),
+            )
+            .env(
+                "MCPSMITH_SMITHERY_REGISTRY_BASE_URL",
+                format!("{}/smithery", registry.base_url),
+            )
+            .args(["catalog", "sync", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let providers = sync["result"]["providers"].as_array().unwrap();
+    let provider_names = providers
+        .iter()
+        .map(|provider| provider["provider"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(provider_names, vec!["official", "smithery"]);
+    assert_eq!(
+        sync["result"]["stats"]["unique_servers"].as_u64().unwrap(),
+        2
+    );
+    assert_eq!(
+        sync["result"]["stats"]["unsupported_provider_records"]
+            .as_u64()
+            .unwrap(),
+        0
+    );
+}

@@ -70,6 +70,9 @@ Done when:
 
 ## 4. Expand the surface area only for real blockers
 
+Status:
+- Done on 2026-03-14.
+
 Goal:
 - Resist feature creep in artifact resolution and catalog support.
 

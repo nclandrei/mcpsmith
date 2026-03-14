@@ -47,11 +47,7 @@ impl Default for CatalogSyncOptions {
 }
 
 fn default_catalog_providers() -> Vec<CatalogProvider> {
-    vec![
-        CatalogProvider::Official,
-        CatalogProvider::Smithery,
-        CatalogProvider::Glama,
-    ]
+    vec![CatalogProvider::Official, CatalogProvider::Smithery]
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -765,5 +761,13 @@ mod tests {
         assert_eq!(stats.unique_servers, 1);
         assert_eq!(stats.remote_only, 1);
         assert_eq!(stats.provider_record_counts["official"], 3);
+    }
+
+    #[test]
+    fn default_catalog_scope_stays_on_official_and_smithery() {
+        assert_eq!(
+            CatalogSyncOptions::default().providers,
+            vec![CatalogProvider::Official, CatalogProvider::Smithery]
+        );
     }
 }

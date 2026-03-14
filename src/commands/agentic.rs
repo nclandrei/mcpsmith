@@ -166,11 +166,7 @@ fn resolve_with_catalog(
 
 pub fn run_catalog_sync_cmd(json: bool, providers: &[String]) -> Result<()> {
     let providers = if providers.is_empty() {
-        vec![
-            CatalogProvider::Official,
-            CatalogProvider::Smithery,
-            CatalogProvider::Glama,
-        ]
+        CatalogSyncOptions::default().providers
     } else {
         providers
             .iter()
