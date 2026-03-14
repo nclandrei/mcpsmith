@@ -202,15 +202,81 @@ fn test_mcpsmith_root_help_lists_agentic_pipeline() {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("One-shot conversion:"))
         .stdout(predicate::str::contains("mcpsmith run <server>"))
         .stdout(predicate::str::contains("mcpsmith resolve <server>"))
         .stdout(predicate::str::contains("mcpsmith verify <server>"))
+        .stdout(predicate::str::contains(
+            "Artifacts are written under .codex-runtime/stages/.",
+        ))
+        .stdout(predicate::str::contains(
+            "Catalog sync defaults to official + smithery.",
+        ))
         .stdout(predicate::str::contains(
             "Every command is non-interactive.",
         ))
         .stdout(predicate::str::contains("\n  discover").not())
         .stdout(predicate::str::contains("\n  apply").not())
         .stdout(predicate::str::contains("contract-test").not());
+}
+
+#[test]
+fn test_mcpsmith_resolve_help_explains_artifact_flow() {
+    let ctx = TestContext::new();
+
+    ctx.cmd()
+        .args(["resolve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Resolve the exact source artifact for one installed MCP.",
+        ))
+        .stdout(predicate::str::contains(
+            "Writes a resolve artifact that snapshot can consume with --from-resolve.",
+        ))
+        .stdout(predicate::str::contains(
+            "Blocks remote-only or source-unavailable servers instead of converting metadata alone.",
+        ))
+        .stdout(predicate::str::contains(
+            "Repeat to inspect multiple MCP config files",
+        ));
+}
+
+#[test]
+fn test_mcpsmith_run_help_explains_install_and_dry_run() {
+    let ctx = TestContext::new();
+
+    ctx.cmd()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Run resolve, snapshot, evidence, synthesize, review, and verify in one command.",
+        ))
+        .stdout(predicate::str::contains(
+            "Installs reviewed skills and removes the MCP config entry unless --dry-run is set.",
+        ))
+        .stdout(predicate::str::contains(
+            "Use --skills-dir to write into an isolated preview directory.",
+        ))
+        .stdout(predicate::str::contains("Examples:"));
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_help_lists_default_providers() {
+    let ctx = TestContext::new();
+
+    ctx.cmd()
+        .args(["catalog", "sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Defaults to the official registry and Smithery.",
+        ))
+        .stdout(predicate::str::contains(
+            "Repeat --provider to override the default provider set.",
+        ))
+        .stdout(predicate::str::contains("--provider <NAME>"));
 }
 
 #[test]

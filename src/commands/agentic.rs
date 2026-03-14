@@ -486,11 +486,14 @@ pub fn run_overview(json: bool) -> Result<()> {
     if json {
         #[derive(Serialize)]
         struct Overview<'a> {
+            one_shot: &'a [&'a str],
             workflow: &'a [&'a str],
+            notes: &'a [&'a str],
         }
         println!(
             "{}",
             serde_json::to_string_pretty(&Overview {
+                one_shot: &["mcpsmith <server>", "mcpsmith run <server>",],
                 workflow: &[
                     "mcpsmith catalog sync",
                     "mcpsmith resolve <server>",
@@ -501,12 +504,21 @@ pub fn run_overview(json: bool) -> Result<()> {
                     "mcpsmith verify <server>",
                     "mcpsmith run <server>",
                 ],
+                notes: &[
+                    "Every command is non-interactive.",
+                    "Artifacts are written under .codex-runtime/stages/.",
+                    "Catalog sync defaults to official + smithery.",
+                ],
             })?
         );
         return Ok(());
     }
 
-    println!("mcpsmith source-grounded pipeline:");
+    println!("mcpsmith source-grounded pipeline");
+    println!("One-shot:");
+    println!("  mcpsmith <server>");
+    println!("  mcpsmith run <server>");
+    println!("Inspectable staged flow:");
     println!("  mcpsmith catalog sync");
     println!("  mcpsmith resolve <server>");
     println!("  mcpsmith snapshot <server>");
@@ -515,6 +527,10 @@ pub fn run_overview(json: bool) -> Result<()> {
     println!("  mcpsmith review <server>");
     println!("  mcpsmith verify <server>");
     println!("  mcpsmith run <server>");
+    println!("Notes:");
+    println!("  Every command is non-interactive.");
+    println!("  Artifacts are written under .codex-runtime/stages/.");
+    println!("  Catalog sync defaults to official + smithery.");
     Ok(())
 }
 

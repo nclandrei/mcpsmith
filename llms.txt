@@ -7,9 +7,12 @@
 - Dry-run one-shot: `HOME="$TMPDIR/mcpsmith-home" cargo run --quiet -- <server> --dry-run --json --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
 - Staged flow: `resolve`, `snapshot`, `evidence`, `synthesize`, `review`, and `verify`, chaining artifact files through `--from-resolve`, `--from-snapshot`, `--from-evidence`, and `--from-bundle`.
 - For CLI/help/output changes, verify in Ghostty with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) and keep session state under `.codex-runtime/`.
+- Default catalog scope: official, smithery
+- Low-confidence mapper fallback: enabled only when deterministic evidence is weak
 
 ## Core commands
 - `cargo run --quiet -- --help`
+- `cargo run --quiet -- run --help`
 - `cargo run --quiet -- catalog sync`
 - `cargo run --quiet -- resolve <server> --json --config "$TMPDIR/mcp.json"`
 - `cargo run --quiet -- snapshot --json --from-resolve <artifact.json>`
@@ -21,10 +24,11 @@
 
 ## Canonical references
 - `README.md`
-- `NEXT-STEPS.md`
 - `AGENTS.md`
+- `llms.txt`
 - `src/main.rs`
 - `src/commands/agentic.rs`
+- `crates/mcpsmith-core/src/pipeline.rs`
 - `tests/cli.rs`
 
 ## Runtime data
@@ -32,5 +36,6 @@
 - Installed skills path: `~/.agents/skills/`
 - Backend selection: explicit `--backend`, then config `backend.preference`, then auto-detect `codex`, then `claude`
 - One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify
+- Deterministic evidence: registration, handler, tests/docs, and confidence are recorded per tool
 - Live smoke is optional confidence evidence, not a hard conversion gate
 - Test/local backend overrides: `MCPSMITH_CODEX_COMMAND`, `MCPSMITH_CLAUDE_COMMAND`

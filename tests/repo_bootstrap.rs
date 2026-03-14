@@ -15,7 +15,6 @@ fn read_repo_file(path: &str) -> String {
 fn repo_bootstrap_files_exist() {
     for path in [
         "AGENTS.md",
-        "NEXT-STEPS.md",
         "llms.txt",
         "README.md",
         "Makefile",
@@ -44,12 +43,14 @@ fn agents_guide_documents_repo_workflow() {
 
     for needle in [
         "## What mcpsmith does",
+        "## Finished scope",
         "## Command matrix",
         "## Isolated runtime rules",
         "## cli-verify workflow",
         "## jj expectations",
         "## Live-MCP verification expectations",
         "Add or update tests first for behavior changes.",
+        "There is no standing roadmap file in the repo.",
     ] {
         assert!(agents.contains(needle), "AGENTS.md missing {needle}");
     }
@@ -66,6 +67,8 @@ fn llms_summary_documents_agent_entrypoints() {
         "Staged flow:",
         "Config path: `~/.mcpsmith/config.yaml`",
         "Installed skills path: `~/.agents/skills/`",
+        "Default catalog scope: official, smithery",
+        "Low-confidence mapper fallback: enabled only when deterministic evidence is weak",
         "One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify",
     ] {
         assert!(llms.contains(needle), "llms.txt missing {needle}");
@@ -82,6 +85,7 @@ fn readme_covers_product_docs_and_examples() {
         "## How it works",
         "## One-shot flow",
         "## Staged flow",
+        "## CLI quick reference",
         "## Catalog and source resolution",
         "## Backend behavior",
         "## Output and artifacts",
@@ -101,6 +105,7 @@ fn readme_covers_product_docs_and_examples() {
         "sample-contract-report.json",
         "contract-test",
         "--from-dossier",
+        "NEXT-STEPS.md",
     ] {
         assert!(
             !readme.contains(legacy),
@@ -110,19 +115,17 @@ fn readme_covers_product_docs_and_examples() {
 }
 
 #[test]
-fn next_steps_documents_the_only_active_follow_up_scope() {
-    let next_steps = read_repo_file("NEXT-STEPS.md");
-    for needle in [
-        "# mcpsmith Next Steps",
-        "This is the only active coordination file",
-        "## 1. Remove dead legacy flow",
-        "## 2. Keep deterministic tool location as the default",
-        "## 3. Add a tiny fallback only for low-confidence cases",
-        "## 4. Expand the surface area only for real blockers",
-    ] {
+fn repo_has_no_standing_next_steps_file() {
+    assert!(
+        !repo_root().join("NEXT-STEPS.md").exists(),
+        "NEXT-STEPS.md should be removed once the roadmap is complete"
+    );
+
+    for path in ["README.md", "AGENTS.md", "llms.txt"] {
+        let contents = read_repo_file(path);
         assert!(
-            next_steps.contains(needle),
-            "NEXT-STEPS.md missing {needle}"
+            !contents.contains("NEXT-STEPS.md"),
+            "{path} should not reference NEXT-STEPS.md after removal"
         );
     }
 }

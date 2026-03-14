@@ -10,10 +10,11 @@ This repo is the standalone product. `distill` is historical context only.
 
 ## What mcpsmith does
 
-- Uses the MCP actually installed on disk, not just registry metadata.
-- Produces staged artifacts that other agents can consume without prompting.
-- Supports a single one-shot command and an inspectable staged pipeline.
-- Keeps generated skills under `~/.agents/skills/` by default.
+- Converts the MCP actually installed on disk, not just registry metadata.
+- Resolves exact local, npm, PyPI, or repository-backed source before conversion.
+- Produces inspectable staged artifacts that other agents can chain without prompts.
+- Uses deterministic tool evidence first, with a narrow mapper fallback only for low-confidence tools.
+- Installs generated skills under `~/.agents/skills/` by default.
 
 ## How it works
 
@@ -46,6 +47,7 @@ Useful one-shot flags:
 - `--backend codex|claude` to force a backend.
 - `--backend-auto` to allow fallback when a preferred backend is unavailable.
 - `--skills-dir <PATH>` to send generated skills somewhere isolated.
+- `--config <PATH>` to point at one or more MCP config files explicitly.
 
 ## Staged flow
 
@@ -106,6 +108,26 @@ The staged artifact files are written under `.codex-runtime/stages/` and can be
 reused by another agent with `--from-resolve`, `--from-snapshot`,
 `--from-evidence`, and `--from-bundle`.
 
+## CLI quick reference
+
+Common help entrypoints:
+
+- `cargo run --quiet -- --help`
+- `cargo run --quiet -- resolve --help`
+- `cargo run --quiet -- evidence --help`
+- `cargo run --quiet -- run --help`
+
+Common commands:
+
+- `cargo run --quiet -- <server> --dry-run --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
+- `cargo run --quiet -- run <server> --json --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
+- `cargo run --quiet -- resolve <server> --json --config "$TMPDIR/mcp.json"`
+- `cargo run --quiet -- snapshot --json --from-resolve <artifact.json>`
+- `cargo run --quiet -- evidence --json --from-snapshot <artifact.json>`
+- `cargo run --quiet -- synthesize --json --from-evidence <artifact.json> --backend codex`
+- `cargo run --quiet -- review --json --from-bundle <artifact.json> --backend codex`
+- `cargo run --quiet -- verify --json --from-bundle <artifact.json>`
+
 ## Catalog and source resolution
 
 `mcpsmith` has two source inputs:
@@ -117,6 +139,10 @@ Catalog commands:
 
 - `cargo run --quiet -- catalog sync`
 - `cargo run --quiet -- catalog stats`
+
+By default, `catalog sync` reads the official registry and Smithery. Use
+`--provider` only when you want to override that default provider set
+explicitly.
 
 Resolution order is deterministic:
 
@@ -158,6 +184,17 @@ Each staged command writes a JSON artifact under `.codex-runtime/stages/`.
 One-shot runs also emit a run report with paths for `resolve`, `snapshot`,
 `evidence`, `synthesis`, `review`, and `verify`.
 
+Evidence artifacts include:
+
+- the chosen registration and handler snippets for each tool
+- confidence and diagnostics for deterministic matching
+- test and documentation citations when they exist
+- mapper fallback output only for low-confidence tools
+
+`run` installs reviewed skills and removes the MCP config entry unless
+`--dry-run` is set. In `--dry-run` mode it still writes the full staged artifact
+set plus a preview skill tree.
+
 ## Examples
 
 Sample fixtures live under [`examples/`](examples):
@@ -167,8 +204,6 @@ Sample fixtures live under [`examples/`](examples):
 - [`examples/sample-run-report.json`](examples/sample-run-report.json)
 - [`examples/sample-skill-pack-tree.txt`](examples/sample-skill-pack-tree.txt)
 
-The active follow-up plan for other agents lives in [`NEXT-STEPS.md`](NEXT-STEPS.md).
-
 ## Troubleshooting
 
 - No servers resolved: pass `--config "$TMPDIR/mcp.json"` and confirm the file
@@ -177,6 +212,9 @@ The active follow-up plan for other agents lives in [`NEXT-STEPS.md`](NEXT-STEPS
   the server is remote-only or missing exact source identity.
 - Synthesis blocked: inspect the `evidence` artifact for missing handler/tests
   citations or unresolved tool locations.
+- Catalog sync output looks too wide: remember the default provider scope is
+  only `official` and `smithery`; unexpected providers usually mean `--provider`
+  was passed explicitly.
 - Review rejected a skill: inspect the `review` artifact and rerun synthesis
   with a better backend or better source evidence.
 - One-shot blocked: use `--dry-run` first, then inspect the staged artifacts

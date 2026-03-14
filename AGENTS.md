@@ -8,8 +8,15 @@ source, builds tool evidence, synthesizes grounded skills, runs a second review
 pass, verifies the skill artifacts, and can atomically write skills while
 removing the MCP config entry.
 
-All work for this plan stays in `mcpsmith`. `distill` is historical context
+All work stays in `mcpsmith`. `distill` is historical context
 only and must not be modified from this repo workflow.
+
+## Finished scope
+
+- There is no standing roadmap file in the repo.
+- The shipped product is the current one-shot flow plus the staged `resolve -> snapshot -> evidence -> synthesize -> review -> verify` pipeline.
+- Deterministic evidence extraction is the default path. The mapper fallback is intentionally narrow and only for low-confidence tools.
+- Default catalog scope is `official` plus `smithery`. Expand providers or resolver coverage only for real blocked conversions.
 
 ## Preferred change flow
 
@@ -22,6 +29,7 @@ only and must not be modified from this repo workflow.
 ## Command matrix
 
 - Overview: `cargo run --quiet --`
+- Root help: `cargo run --quiet -- --help`
 - One-shot conversion: `cargo run --quiet -- <server>`
 - Full one-shot with explicit subcommand: `cargo run --quiet -- run <server>`
 - Catalog: `cargo run --quiet -- catalog sync`, `cargo run --quiet -- catalog stats`
@@ -31,7 +39,16 @@ only and must not be modified from this repo workflow.
 - Staged synthesis: `cargo run --quiet -- synthesize <server|--from-evidence artifact.json> --json`
 - Staged review: `cargo run --quiet -- review <server|--from-bundle artifact.json> --json`
 - Staged verify: `cargo run --quiet -- verify <server|--from-bundle artifact.json> --json`
-- Help: `cargo run --quiet -- --help`, `cargo run --quiet -- <command> --help`
+- Command help: `cargo run --quiet -- <command> --help`
+
+What each stage emits:
+
+- `resolve`: exact artifact identity and block reason if source is unavailable
+- `snapshot`: local source root for the pinned artifact
+- `evidence`: per-tool registration, handler, test/doc citations, and confidence
+- `synthesize`: drafted skills from the evidence bundle
+- `review`: second-pass approval, findings, and revised drafts when applicable
+- `verify`: final format/grounding/reference checks
 
 ## Isolated runtime rules
 
@@ -76,6 +93,7 @@ Minimum visual proofs for CLI changes:
 
 - `mcpsmith --help`
 - `mcpsmith resolve --help`
+- `mcpsmith run --help`
 - one real error path
 - one staged success flow
 - one one-shot success flow
@@ -95,3 +113,4 @@ Every screenshot must be paired with pane capture output.
 - Live smoke is confidence evidence, not a hard gate for skill generation.
 - Keep live MCP validation isolated with temp `HOME`, temp config files, and temp skills output.
 - Preserve staged artifacts and run reports when they help explain failures or confirm behavior.
+- For catalog verification, remember the default scope is only `official` and `smithery`.
