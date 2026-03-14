@@ -229,17 +229,10 @@ jobs:
 
           gh release upload "$tag" "${files[@]}" --clobber
 
-      - name: Upload Homebrew formula artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: homebrew-formula
-          path: target/distrib/*.rb
-          if-no-files-found: error
-
   publish-homebrew:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: [prepare-release, dist-global]
+    needs: [prepare-release, publish-crates]
     if: needs.prepare-release.outputs.release_needed == 'true'
     steps:
       - name: Ensure Homebrew tap token is configured
@@ -252,17 +245,26 @@ jobs:
           fi
 
       - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           persist-credentials: true
           repository: nclandrei/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Download Homebrew formula
-        uses: actions/download-artifact@v7
-        with:
-          name: homebrew-formula
-          path: homebrew-tap/Formula
+      - name: Render Homebrew formula from crates.io package
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare-release.outputs.release_version }}"
+          crate_url="https://static.crates.io/crates/mcpsmith/mcpsmith-${version}.crate"
+
+          curl -fsSL "$crate_url" -o /tmp/mcpsmith.crate
+          crate_sha="$(sha256sum /tmp/mcpsmith.crate | awk '{print $1}')"
+
+          ./scripts/release/render-homebrew-formula.sh \
+            "$version" \
+            "$crate_sha" \
+            homebrew-tap/Formula/mcpsmith.rb
 
       - name: Commit and push formula
         env:

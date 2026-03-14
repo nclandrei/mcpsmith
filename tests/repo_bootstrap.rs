@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +25,7 @@ fn repo_bootstrap_files_exist() {
         "examples/sample-run-report.json",
         "examples/sample-skill-pack-tree.txt",
         "scripts/local-checks.sh",
+        "scripts/release/render-homebrew-formula.sh",
         "scripts/smoke/common.sh",
         "scripts/smoke/smoke-test-installed-mcpsmith.sh",
         "scripts/smoke/mock_fixture_flow.sh",
@@ -74,6 +76,7 @@ fn llms_summary_documents_agent_entrypoints() {
         "Default catalog scope: official, smithery",
         "Low-confidence mapper fallback: enabled only when deterministic evidence is weak",
         "Homebrew tap: `nclandrei/homebrew-tap`",
+        "formula installs from the published crates.io source package",
         "Release workflow: `.github/workflows/release.yml`",
         "One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify",
     ] {
@@ -171,6 +174,7 @@ fn ci_workflows_cover_local_checks_live_smoke_and_release() {
         "publish-homebrew",
         "publish-crates",
         "scripts/smoke/smoke-test-installed-mcpsmith.sh",
+        "scripts/release/render-homebrew-formula.sh",
         "gh release edit",
     ] {
         assert!(
@@ -192,8 +196,7 @@ fn cargo_manifests_include_release_metadata() {
         "mcpsmith-core = { version = ",
         "[profile.dist]",
         "[package.metadata.dist]",
-        "installers = [\"shell\", \"homebrew\"]",
-        "tap = \"nclandrei/homebrew-tap\"",
+        "installers = [\"shell\"]",
     ] {
         assert!(
             root_manifest.contains(needle),
@@ -219,9 +222,7 @@ fn cargo_manifests_include_release_metadata() {
     for needle in [
         "cargo-dist-version = ",
         "ci = \"github\"",
-        "installers = [\"shell\", \"homebrew\"]",
-        "tap = \"nclandrei/homebrew-tap\"",
-        "publish-jobs = [\"homebrew\"]",
+        "installers = [\"shell\"]",
     ] {
         assert!(
             dist_workspace.contains(needle),
@@ -247,6 +248,7 @@ fn local_checks_script_is_executable() {
 
     for path in [
         "scripts/local-checks.sh",
+        "scripts/release/render-homebrew-formula.sh",
         "scripts/smoke/common.sh",
         "scripts/smoke/smoke-test-installed-mcpsmith.sh",
         "scripts/smoke/mock_fixture_flow.sh",
@@ -258,6 +260,35 @@ fn local_checks_script_is_executable() {
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0, "{path} is not executable");
+    }
+}
+
+#[test]
+fn homebrew_formula_renderer_outputs_crates_io_formula() {
+    let output_dir = tempfile::tempdir().unwrap();
+    let output_path = output_dir.path().join("mcpsmith.rb");
+
+    let status = Command::new(repo_root().join("scripts/release/render-homebrew-formula.sh"))
+        .arg("9.9.9")
+        .arg("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        .arg(&output_path)
+        .status()
+        .expect("failed to run Homebrew formula renderer");
+    assert!(status.success(), "formula renderer exited unsuccessfully");
+
+    let formula = fs::read_to_string(&output_path).expect("failed to read rendered formula");
+    for needle in [
+        "homepage \"https://crates.io/crates/mcpsmith\"",
+        "url \"https://static.crates.io/crates/mcpsmith/mcpsmith-9.9.9.crate\"",
+        "version \"9.9.9\"",
+        "sha256 \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+        "system \"cargo\", \"install\", *std_cargo_args",
+        "assert_match \"Usage: mcpsmith\", shell_output(\"#{bin}/mcpsmith --help\")",
+    ] {
+        assert!(
+            formula.contains(needle),
+            "rendered formula missing {needle}"
+        );
     }
 }
 

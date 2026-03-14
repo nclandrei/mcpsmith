@@ -21,11 +21,14 @@ This repo is the standalone product. `distill` is historical context only.
 ```bash
 # Homebrew
 brew tap nclandrei/tap
-brew install mcpsmith
+brew install nclandrei/tap/mcpsmith
 
 # crates.io
 cargo install mcpsmith
 ```
+
+The Homebrew formula installs from the published `mcpsmith` crate on crates.io.
+That keeps the tap usable even though the GitHub repo is private.
 
 ## How it works
 
@@ -222,7 +225,8 @@ Pushing to `main` triggers the release workflow. When the version in
 
 - publish release artifacts to GitHub Releases
 - publish `mcpsmith-core` and then `mcpsmith` to crates.io
-- update the Homebrew formula in `nclandrei/homebrew-tap`
+- update the Homebrew formula in `nclandrei/homebrew-tap` from the published
+  `mcpsmith-<version>.crate` tarball on crates.io
 
 The workflow creates the `v<version>` tag automatically. You do not need to
 push tags manually. If a non-draft GitHub release for the current version
@@ -238,6 +242,11 @@ Required GitHub Actions secrets:
   `nclandrei/homebrew-tap`
 
 Release process:
+1. Build and smoke-test release artifacts with cargo-dist.
+2. Publish `mcpsmith-core`, then `mcpsmith`, to crates.io.
+3. Render `Formula/mcpsmith.rb` from the published crate checksum and push it to
+   `nclandrei/homebrew-tap`.
+4. Publish the GitHub release by clearing the draft flag.
 
 ```bash
 # bump Cargo.toml versions first when needed

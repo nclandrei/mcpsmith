@@ -133,9 +133,34 @@ impl Drop for StubRegistryServer {
 }
 
 fn handle_registry_request(stream: &mut TcpStream) {
-    let mut buffer = [0u8; 4096];
-    let read = stream.read(&mut buffer).unwrap_or(0);
-    let request = String::from_utf8_lossy(&buffer[..read]);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                request_bytes.extend_from_slice(&buffer[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if !request_bytes.is_empty() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let request = String::from_utf8_lossy(&request_bytes);
     let path = request
         .lines()
         .next()

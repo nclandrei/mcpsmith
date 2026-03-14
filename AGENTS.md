@@ -121,4 +121,6 @@ Every screenshot must be paired with pane capture output.
 - Successful runs publish GitHub release artifacts, publish `mcpsmith-core` and `mcpsmith` to crates.io, and update `nclandrei/homebrew-tap`.
 - The workflow auto-creates the `v<version>` tag from `Cargo.toml`; do not push release tags manually.
 - When changing packaging or release logic, run `./scripts/smoke/smoke-test-installed-mcpsmith.sh <binary-or-tarball>` locally against a built artifact.
+- The tap formula is rendered from the published `mcpsmith-<version>.crate` tarball on crates.io because the GitHub repo is private.
+- The renderer lives at `scripts/release/render-homebrew-formula.sh`.
 - Required GitHub Actions secrets are `CARGO_REGISTRY_TOKEN` and `HOMEBREW_TAP_TOKEN`.

@@ -9,7 +9,7 @@
 - For CLI/help/output changes, verify in Ghostty with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) and keep session state under `.codex-runtime/`.
 - Default catalog scope: official, smithery
 - Low-confidence mapper fallback: enabled only when deterministic evidence is weak
-- Homebrew tap: `nclandrei/homebrew-tap`
+- Homebrew tap: `nclandrei/homebrew-tap` (formula installs from the published crates.io source package)
 - Release workflow: `.github/workflows/release.yml`
 
 ## Core commands
@@ -29,6 +29,7 @@
 - `AGENTS.md`
 - `llms.txt`
 - `.github/workflows/release.yml`
+- `scripts/release/render-homebrew-formula.sh`
 - `src/main.rs`
 - `src/commands/agentic.rs`
 - `crates/mcpsmith-core/src/pipeline.rs`
@@ -41,5 +42,6 @@
 - One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify
 - Deterministic evidence: registration, handler, tests/docs, and confidence are recorded per tool
 - Installed-binary smoke test: `./scripts/smoke/smoke-test-installed-mcpsmith.sh`
+- Homebrew formula renderer: `./scripts/release/render-homebrew-formula.sh`
 - Live smoke is optional confidence evidence, not a hard conversion gate
 - Test/local backend overrides: `MCPSMITH_CODEX_COMMAND`, `MCPSMITH_CLAUDE_COMMAND`
