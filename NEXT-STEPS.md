@@ -32,6 +32,9 @@ Done when:
 
 ## 2. Keep deterministic tool location as the default
 
+Status:
+- Done on 2026-03-14.
+
 Goal:
 - Keep tool evidence extraction simple and predictable.
 

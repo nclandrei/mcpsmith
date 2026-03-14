@@ -1330,8 +1330,6 @@ fn should_include_entry(entry: &DirEntry) -> bool {
         name.as_ref(),
         ".git"
             | "node_modules"
-            | "dist"
-            | "build"
             | "target"
             | ".venv"
             | "__pycache__"
@@ -1401,15 +1399,17 @@ fn locate_tool_evidence(
     let registration_match = source_matches
         .iter()
         .filter(|item| item.registration_like)
+        .filter(|item| !looks_like_generated_bundle_path(&item.relative_path))
         .max_by(|left, right| left.registration_score.total_cmp(&right.registration_score));
+    let registration_match = registration_match.or_else(|| {
+        source_matches
+            .iter()
+            .filter(|item| item.registration_like)
+            .max_by(|left, right| left.registration_score.total_cmp(&right.registration_score))
+    });
     let handler_match = source_matches
         .iter()
-        .filter(|item| {
-            item.handler_like
-                && registration_match
-                    .map(|registration| registration.relative_path != item.relative_path)
-                    .unwrap_or(true)
-        })
+        .filter(|item| item.handler_like && !looks_like_generated_bundle_path(&item.relative_path))
         .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
         .or_else(|| {
             source_matches
@@ -1560,14 +1560,43 @@ fn exact_path_component_match(path: &Path, compact_tool: &str) -> bool {
             })
 }
 
+fn has_named_path_component(path: &Path, names: &[&str]) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy();
+        names.iter().any(|name| value.eq_ignore_ascii_case(name))
+    })
+}
+
+fn looks_like_generated_bundle_path(path: &Path) -> bool {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    has_named_path_component(path, &["third_party", "vendor", "vendors", "bundled"])
+        || text.ends_with("bundle.js")
+        || text.contains("-bundle.")
+        || text.contains("_bundle.")
+}
+
+fn looks_like_tool_source_path(path: &Path) -> bool {
+    has_named_path_component(
+        path,
+        &[
+            "tools", "tool", "handlers", "handler", "commands", "command",
+        ],
+    )
+}
+
 fn is_registration_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.contains("server.tool(")
         || trimmed.contains("server.tool (")
         || trimmed.contains("registertool")
         || trimmed.contains("register_tool")
+        || trimmed.contains("definetool(")
+        || trimmed.contains("definepagetool(")
         || trimmed.contains("@mcp.tool")
         || trimmed.contains("mcp.tool(")
+        || trimmed.starts_with("id:")
+        || trimmed.starts_with("mcp:")
+        || trimmed.starts_with("toolid:")
         || (trimmed.contains("name")
             && (trimmed.contains("description")
                 || trimmed.contains("inputschema")
@@ -1588,20 +1617,80 @@ fn is_handler_line(line: &str) -> bool {
         || trimmed.starts_with("pub fn ")
         || trimmed.starts_with("async fn ")
         || trimmed.starts_with("fn ")
+        || trimmed.starts_with("handler:")
+        || trimmed.contains("handler: async")
+        || trimmed.contains("logicfunction:")
+        || ((trimmed.contains("=> {") || trimmed.contains("=>{"))
+            && (trimmed.contains("server.tool(")
+                || trimmed.contains("server.tool (")
+                || trimmed.contains("registertool")
+                || trimmed.contains("register_tool")))
 }
 
 fn has_registration_context(contents: &str, required_inputs: &[String]) -> bool {
     contents.contains("server.tool")
         || contents.contains("registertool")
         || contents.contains("register_tool")
+        || contents.contains("definetool(")
+        || contents.contains("definepagetool(")
         || contents.contains("@mcp.tool")
         || contents.contains("mcp.tool(")
+        || contents.contains("\nid:")
+        || contents.contains("\nmcp:")
+        || contents.contains("\ntoolid:")
         || contents.contains("inputschema")
         || contents.contains("input_schema")
         || required_inputs.iter().any(|input| {
             let quoted = format!("\"{}\"", input.to_ascii_lowercase());
             contents.contains(&quoted)
         })
+}
+
+fn contextual_handler_bonus(
+    contents: &str,
+    registration_line_index: usize,
+    search_terms: &ToolSearchTerms,
+) -> Option<(usize, f32)> {
+    let lines = contents.lines().collect::<Vec<_>>();
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, line) in lines.iter().enumerate().skip(registration_line_index) {
+        let line_lower = line.to_ascii_lowercase();
+        if idx > registration_line_index && is_tool_definition_boundary(&line_lower) {
+            break;
+        }
+        if !is_handler_line(&line_lower) {
+            continue;
+        }
+
+        let distance = idx.abs_diff(registration_line_index);
+        let compact_line = compact_ascii(line);
+        let line_hits = unique_term_hits(&line_lower, &compact_line, search_terms);
+        let mut score = 9.0 - distance.min(120) as f32 * 0.02;
+        if line_lower.contains("handler:") {
+            score += 2.5;
+        }
+        if line_hits > 0 {
+            score += line_hits as f32 * 1.5;
+        }
+
+        match best {
+            Some((_, best_score)) if best_score >= score => {}
+            _ => best = Some((idx, score)),
+        }
+    }
+    best
+}
+
+fn is_tool_definition_boundary(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.contains("server.tool(")
+        || trimmed.contains("server.tool (")
+        || trimmed.contains("registertool")
+        || trimmed.contains("register_tool")
+        || trimmed.contains("definetool(")
+        || trimmed.contains("definepagetool(")
+        || trimmed.contains("@mcp.tool")
+        || trimmed.contains("mcp.tool(")
 }
 
 fn score_indexed_file(
@@ -1630,6 +1719,8 @@ fn score_indexed_file(
         .contents
         .lines()
         .any(|line| is_handler_line(&line.to_ascii_lowercase()));
+    let tool_source_path = looks_like_tool_source_path(&indexed.relative_path);
+    let generated_bundle_path = looks_like_generated_bundle_path(&indexed.relative_path);
 
     let mut best_line_index = 0usize;
     let mut best_line_score = 0.0f32;
@@ -1681,6 +1772,15 @@ fn score_indexed_file(
         }
     }
 
+    if best_handler_line_score == 0.0
+        && best_registration_line_score > 0.0
+        && let Some((idx, contextual_score)) =
+            contextual_handler_bonus(&indexed.contents, registration_line_index, search_terms)
+    {
+        best_handler_line_score = contextual_score;
+        handler_line_index = idx;
+    }
+
     let registration_like = best_registration_line_score > 0.0
         || (exact_path_match && has_registration_context(&haystack, required_inputs));
     let handler_like = best_handler_line_score > 0.0 || (exact_path_match && has_handler_context);
@@ -1688,6 +1788,12 @@ fn score_indexed_file(
     let mut score = content_hits as f32 * 2.0 + path_hits as f32 * 2.5 + best_line_score;
     if exact_path_match {
         score += 4.0;
+    }
+    if tool_source_path {
+        score += 2.0;
+    }
+    if generated_bundle_path {
+        score -= 8.0;
     }
     if registration_like {
         score += 2.0;
@@ -1855,8 +1961,33 @@ fn build_tool_evidence_diagnostics(
 }
 
 fn is_test_path(path: &Path) -> bool {
-    let text = path.to_string_lossy().to_ascii_lowercase();
-    text.contains("test") || text.contains("spec")
+    if path.components().any(|component| {
+        matches!(
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .as_str(),
+            "test" | "tests" | "__tests__" | "spec" | "specs" | "__snapshots__"
+        )
+    }) {
+        return true;
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if stem.ends_with(".test")
+        || stem.ends_with(".spec")
+        || stem.ends_with("_test")
+        || stem.ends_with("_spec")
+    {
+        return true;
+    }
+
+    matches!(path.extension().and_then(OsStr::to_str), Some("py")) && stem.starts_with("test_")
 }
 
 fn is_doc_path(path: &Path) -> bool {
@@ -2428,5 +2559,214 @@ def read_docs(query: str) -> str:
             Some(PathBuf::from("server.py"))
         );
         assert_eq!(pack.required_inputs, vec!["query".to_string()]);
+    }
+
+    #[test]
+    fn locate_tool_evidence_prefers_first_party_tool_files_over_third_party_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("click", &["uid"]),
+            &[
+                indexed_file(
+                    "build/src/tools/input.js",
+                    r#"export const click = definePageTool({
+  name: "click",
+  description: "Clicks on the provided element",
+  schema: {
+    uid: zod.string(),
+  },
+  handler: async (request) => request.params.uid,
+});"#,
+                ),
+                indexed_file(
+                    "build/src/third_party/lighthouse-devtools-mcp-bundle.js",
+                    r#"export const click = definePageTool({
+  name: "click",
+  description: "Clicks on the provided element",
+  inputSchema: {
+    required: ["uid"],
+  },
+  handler: async (request) => {
+    return request.params.uid;
+  },
+});
+
+const clickHint = "click";
+const clickSummary = "click click click";"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/input.js"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/input.js"))
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_matches_same_file_handler_when_tool_name_differs_from_file_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("take_screenshot", &["filePath"]),
+            &[
+                indexed_file(
+                    "build/src/tools/screenshot.js",
+                    r#"export const screenshot = definePageTool({
+  name: "take_screenshot",
+  description: "Take a screenshot of the page or element.",
+  schema: {
+    filePath: zod.string().optional(),
+  },
+  handler: async (request, response, context) => {
+    return context.saveFile("data", request.params.filePath);
+  },
+});"#,
+                ),
+                indexed_file(
+                    "build/src/index.js",
+                    r#"server.registerTool(tool.name, {
+  description: tool.description,
+  inputSchema: tool.schema,
+}, async (params) => tool.handler(params));"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/screenshot.js"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/screenshot.js"))
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_matches_define_tool_factory_handlers_in_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("evaluate_script", &["function"]),
+            &[
+                indexed_file(
+                    "build/src/tools/script.js",
+                    r#"export const evaluateScript = defineTool(cliArgs => {
+  return {
+    name: "evaluate_script",
+    description: "Evaluate a script",
+    schema: {
+      function: zod.string(),
+    },
+    handler: async (request, response) => {
+      response.appendResponseLine(request.params.function);
+    },
+  };
+});"#,
+                ),
+                indexed_file(
+                    "build/src/index.js",
+                    r#"server.registerTool(tool.name, {
+  description: tool.description,
+  inputSchema: tool.schema,
+}, async (params) => tool.handler(params));"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/script.js"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/script.js"))
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_finds_same_file_handlers_after_long_schema_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("take_screenshot", &["filePath"]),
+            &[
+                indexed_file(
+                    "build/src/tools/screenshot.js",
+                    r#"export const screenshot = definePageTool({
+  name: "take_screenshot",
+  description: "Take a screenshot of the page or element.",
+  schema: {
+    alpha: zod.string().optional(),
+    beta: zod.string().optional(),
+    gamma: zod.string().optional(),
+    delta: zod.string().optional(),
+    epsilon: zod.string().optional(),
+    zeta: zod.string().optional(),
+    eta: zod.string().optional(),
+    theta: zod.string().optional(),
+    iota: zod.string().optional(),
+    kappa: zod.string().optional(),
+    lambda: zod.string().optional(),
+    mu: zod.string().optional(),
+    nu: zod.string().optional(),
+    xi: zod.string().optional(),
+    omicron: zod.string().optional(),
+    pi: zod.string().optional(),
+    rho: zod.string().optional(),
+    sigma: zod.string().optional(),
+    tau: zod.string().optional(),
+    upsilon: zod.string().optional(),
+    phi: zod.string().optional(),
+    chi: zod.string().optional(),
+    psi: zod.string().optional(),
+    omega: zod.string().optional(),
+    filePath: zod.string().optional(),
+  },
+  handler: async (request, response, context) => {
+    return context.saveFile("data", request.params.filePath);
+  },
+});"#,
+                ),
+                indexed_file(
+                    "build/src/index.js",
+                    r#"server.registerTool(tool.name, {
+  description: tool.description,
+  inputSchema: tool.schema,
+}, async (params) => tool.handler(params));"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/screenshot.js"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("build/src/tools/screenshot.js"))
+        );
     }
 }
