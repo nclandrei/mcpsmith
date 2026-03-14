@@ -1416,18 +1416,7 @@ fn locate_tool_evidence(
                 .iter()
                 .filter(|item| item.handler_like)
                 .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
-        })
-        .or_else(|| {
-            source_matches
-                .iter()
-                .filter(|item| {
-                    registration_match
-                        .map(|registration| registration.relative_path != item.relative_path)
-                        .unwrap_or(true)
-                })
-                .max_by(|left, right| left.score.total_cmp(&right.score))
-        })
-        .or_else(|| source_matches.first());
+        });
     let registration =
         registration_match.map(|item| snippet_from_match(root, item, MatchRole::Registration));
     let handler = handler_match.map(|item| snippet_from_match(root, item, MatchRole::Handler));
@@ -1681,7 +1670,7 @@ fn score_indexed_file(
             registration_line_index = idx;
         }
 
-        let handler_score = if handler_line && file_support {
+        let handler_score = if handler_line && (line_hits > 0 || exact_path_match) {
             base_score + 6.0
         } else {
             0.0
@@ -1693,8 +1682,8 @@ fn score_indexed_file(
     }
 
     let registration_like = best_registration_line_score > 0.0
-        || (file_support && has_registration_context(&haystack, required_inputs));
-    let handler_like = best_handler_line_score > 0.0 || (file_support && has_handler_context);
+        || (exact_path_match && has_registration_context(&haystack, required_inputs));
+    let handler_like = best_handler_line_score > 0.0 || (exact_path_match && has_handler_context);
 
     let mut score = content_hits as f32 * 2.0 + path_hits as f32 * 2.5 + best_line_score;
     if exact_path_match {
@@ -2354,5 +2343,90 @@ mod tests {
             "expected confidence summary in diagnostics, got {:?}",
             pack.diagnostics
         );
+    }
+
+    #[test]
+    fn locate_tool_evidence_does_not_invent_handler_from_generic_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("execute", &["query"]),
+            &[
+                indexed_file(
+                    "src/index.ts",
+                    r#"server.tool("execute", { description: "Run execute", inputSchema: { type: "object", required: ["query"] } }, async (args) => runner(args));"#,
+                ),
+                indexed_file(
+                    "src/source.rs",
+                    r#"// execute command helpers live here
+pub fn helper() {
+  println!("helper");
+}"#,
+                ),
+                indexed_file(
+                    "src/command.ts",
+                    r#"// execute pipeline internals
+async function callBackend() {
+  return "ok";
+}"#,
+                ),
+            ],
+        );
+
+        assert!(
+            pack.handler.is_none(),
+            "unexpected handler: {:?}",
+            pack.handler
+        );
+        assert!(
+            pack.confidence < 0.70,
+            "unexpected confidence: {}",
+            pack.confidence
+        );
+        assert!(
+            pack.diagnostics
+                .iter()
+                .any(|line| line.contains("No handler-like")),
+            "expected missing handler diagnostic, got {:?}",
+            pack.diagnostics
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_matches_fastmcp_python_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("read_docs", &["query"]),
+            &[
+                indexed_file(
+                    "server.py",
+                    r#"@mcp.tool()
+def read_docs(query: str) -> str:
+    """Read docs for a query."""
+    return query"#,
+                ),
+                indexed_file(
+                    "tests/test_server.py",
+                    r#"def test_read_docs():
+    result = call_tool("read_docs", {"query": "demo"})
+    assert result == "demo""#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("server.py"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("server.py"))
+        );
+        assert_eq!(pack.required_inputs, vec!["query".to_string()]);
     }
 }
