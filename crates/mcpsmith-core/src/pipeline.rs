@@ -1,6 +1,6 @@
 use crate::backend::{
-    prepare_backend_context, review_tool_conversion_with_backend,
-    synthesize_tool_conversion_with_backend,
+    map_low_confidence_tool_with_backend, prepare_backend_context,
+    review_tool_conversion_with_backend, synthesize_tool_conversion_with_backend,
 };
 use crate::install::{remove_server_from_config, rollback_server_skill_files};
 use crate::runtime::introspect_tool_specs;
@@ -28,6 +28,8 @@ use zip::ZipArchive;
 
 const MAX_SUPPORTING_SNIPPETS: usize = 4;
 const MAX_TEST_SNIPPETS: usize = 3;
+const MAX_MAPPER_CANDIDATES: usize = 6;
+const LOW_CONFIDENCE_THRESHOLD: f32 = 0.60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -94,6 +96,38 @@ pub struct SnippetEvidence {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapperRelevantFileRole {
+    Registration,
+    Handler,
+    Supporting,
+}
+
+impl std::fmt::Display for MapperRelevantFileRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MapperRelevantFileRole::Registration => write!(f, "registration"),
+            MapperRelevantFileRole::Handler => write!(f, "handler"),
+            MapperRelevantFileRole::Supporting => write!(f, "supporting"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MapperRelevantFile {
+    pub path: PathBuf,
+    pub role: MapperRelevantFileRole,
+    pub why: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MapperFallbackEvidence {
+    pub backend: String,
+    pub relevant_files: Vec<MapperRelevantFile>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolEvidencePack {
     pub tool_name: String,
@@ -110,6 +144,8 @@ pub struct ToolEvidencePack {
     pub doc_snippets: Vec<SnippetEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapper_fallback: Option<MapperFallbackEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
     pub confidence: f32,
@@ -618,6 +654,54 @@ pub fn build_evidence_bundle(
     })
 }
 
+fn enrich_low_confidence_evidence(
+    evidence: &EvidenceBundle,
+    backend_name: ConvertBackendName,
+    timeout_seconds: u64,
+) -> Result<EvidenceBundle> {
+    let index = index_snapshot(&evidence.snapshot.source_root)?;
+    let mut enriched = evidence.clone();
+
+    for pack in &mut enriched.tool_evidence {
+        if pack.confidence >= LOW_CONFIDENCE_THRESHOLD {
+            continue;
+        }
+
+        let match_set = collect_tool_match_set(&pack.runtime_tool, &index);
+        let candidates = mapper_candidates(&match_set);
+        if candidates.is_empty() {
+            enriched.diagnostics.push(format!(
+                "Mapper fallback skipped for '{}': no candidate files survived deterministic narrowing.",
+                pack.tool_name
+            ));
+            continue;
+        }
+
+        match map_low_confidence_tool_with_backend(
+            backend_name,
+            &evidence.server,
+            pack,
+            &candidates,
+            timeout_seconds,
+        ) {
+            Ok(fallback) if !fallback.relevant_files.is_empty() => {
+                let runtime_tool = pack.runtime_tool.clone();
+                *pack = build_tool_evidence_pack(&runtime_tool, &match_set, Some(fallback));
+            }
+            Ok(_) => enriched.diagnostics.push(format!(
+                "Mapper fallback returned no additional files for '{}'.",
+                pack.tool_name
+            )),
+            Err(err) => enriched.diagnostics.push(format!(
+                "Mapper fallback failed for '{}': {}",
+                pack.tool_name, err
+            )),
+        }
+    }
+
+    Ok(enriched)
+}
+
 pub fn synthesize_from_evidence(
     evidence: &EvidenceBundle,
     options: &RunOptions,
@@ -628,17 +712,28 @@ pub fn synthesize_from_evidence(
         &options.backend_config,
     )?;
 
-    let mut tool_conversions = Vec::with_capacity(evidence.tool_evidence.len());
     let mut diagnostics = backend_ctx.selection.diagnostics.clone();
+    let enriched_evidence = match enrich_low_confidence_evidence(
+        evidence,
+        backend_ctx.selection.selected,
+        options.backend_config.timeout_seconds,
+    ) {
+        Ok(enriched) => enriched,
+        Err(err) => {
+            diagnostics.push(format!("Low-confidence mapper preparation failed: {}", err));
+            evidence.clone()
+        }
+    };
+    let mut tool_conversions = Vec::with_capacity(enriched_evidence.tool_evidence.len());
     let mut blocked = false;
     let mut block_reasons = Vec::new();
     let mut selected_backend = backend_ctx.selection.selected;
     let mut fallback_used = false;
 
-    for pack in &evidence.tool_evidence {
+    for pack in &enriched_evidence.tool_evidence {
         match synthesize_tool_conversion_with_backend(
             selected_backend,
-            &evidence.server,
+            &enriched_evidence.server,
             pack,
             options.backend_config.timeout_seconds,
         ) {
@@ -681,7 +776,7 @@ pub fn synthesize_from_evidence(
 
     let bundle = ServerConversionBundle {
         generated_at: Utc::now(),
-        evidence: evidence.clone(),
+        evidence: enriched_evidence,
         backend_used: selected_backend.to_string(),
         backend_fallback_used: fallback_used,
         tool_conversions,
@@ -826,6 +921,7 @@ pub fn run_pipeline(
     let evidence = build_evidence_bundle(&resolved, &snapshot.snapshot, None)?;
     write_json_artifact(&artifacts.evidence, &evidence)?;
     let synthesis = synthesize_from_evidence(&evidence, options)?;
+    write_json_artifact(&artifacts.evidence, &synthesis.bundle.evidence)?;
     write_json_artifact(&artifacts.synthesis, &synthesis)?;
     let review = review_conversion_bundle(&synthesis.bundle, options)?;
     write_json_artifact(&artifacts.review, &review)?;
@@ -1357,12 +1453,24 @@ fn is_text_candidate(path: &Path) -> bool {
     ) || path.file_name().and_then(OsStr::to_str) == Some("README")
 }
 
-fn locate_tool_evidence(
-    root: &Path,
-    runtime_tool: &RuntimeTool,
-    index: &[IndexedFile],
-) -> ToolEvidencePack {
-    let search_terms = tool_search_terms(&runtime_tool.name);
+#[derive(Debug)]
+struct ToolMatchSet {
+    required_inputs: Vec<String>,
+    source_matches: Vec<FileMatch>,
+    test_matches: Vec<FileMatch>,
+    doc_matches: Vec<FileMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ToolMapperCandidate {
+    pub(crate) path: PathBuf,
+    pub(crate) score: f32,
+    pub(crate) registration_hint: bool,
+    pub(crate) handler_hint: bool,
+    pub(crate) excerpt: String,
+}
+
+fn required_inputs_from_runtime_tool(runtime_tool: &RuntimeTool) -> Vec<String> {
     let mut required_inputs = runtime_tool
         .input_schema
         .as_ref()
@@ -1375,7 +1483,12 @@ fn locate_tool_evidence(
         .collect::<Vec<_>>();
     required_inputs.sort();
     required_inputs.dedup();
+    required_inputs
+}
 
+fn collect_tool_match_set(runtime_tool: &RuntimeTool, index: &[IndexedFile]) -> ToolMatchSet {
+    let search_terms = tool_search_terms(&runtime_tool.name);
+    let required_inputs = required_inputs_from_runtime_tool(runtime_tool);
     let mut source_matches = vec![];
     let mut test_matches = vec![];
     let mut doc_matches = vec![];
@@ -1392,56 +1505,200 @@ fn locate_tool_evidence(
         }
     }
 
-    source_matches.sort_by(|left, right| right.score.total_cmp(&left.score));
-    test_matches.sort_by(|left, right| right.score.total_cmp(&left.score));
-    doc_matches.sort_by(|left, right| right.score.total_cmp(&left.score));
+    source_matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    test_matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    doc_matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
 
-    let registration_match = source_matches
+    ToolMatchSet {
+        required_inputs,
+        source_matches,
+        test_matches,
+        doc_matches,
+    }
+}
+
+fn deterministic_registration_match(match_set: &ToolMatchSet) -> Option<&FileMatch> {
+    let registration_match = match_set
+        .source_matches
         .iter()
         .filter(|item| item.registration_like)
         .filter(|item| !looks_like_generated_bundle_path(&item.relative_path))
         .max_by(|left, right| left.registration_score.total_cmp(&right.registration_score));
-    let registration_match = registration_match.or_else(|| {
-        source_matches
+    registration_match.or_else(|| {
+        match_set
+            .source_matches
             .iter()
             .filter(|item| item.registration_like)
             .max_by(|left, right| left.registration_score.total_cmp(&right.registration_score))
-    });
-    let handler_match = source_matches
+    })
+}
+
+fn deterministic_handler_match(match_set: &ToolMatchSet) -> Option<&FileMatch> {
+    match_set
+        .source_matches
         .iter()
         .filter(|item| item.handler_like && !looks_like_generated_bundle_path(&item.relative_path))
         .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
         .or_else(|| {
-            source_matches
+            match_set
+                .source_matches
                 .iter()
                 .filter(|item| item.handler_like)
                 .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
-        });
-    let registration =
-        registration_match.map(|item| snippet_from_match(root, item, MatchRole::Registration));
-    let handler = handler_match.map(|item| snippet_from_match(root, item, MatchRole::Handler));
-    let supporting_snippets = source_matches
-        .iter()
-        .filter(|item| {
-            registration_match
-                .map(|registration| registration.relative_path != item.relative_path)
-                .unwrap_or(true)
-                && handler_match
-                    .map(|handler| handler.relative_path != item.relative_path)
-                    .unwrap_or(true)
         })
-        .take(MAX_SUPPORTING_SNIPPETS)
-        .map(|item| snippet_from_match(root, item, MatchRole::Best))
-        .collect::<Vec<_>>();
-    let test_snippets = test_matches
+}
+
+fn snippet_from_selected_match(file_match: &FileMatch, role: MatchRole) -> SnippetEvidence {
+    match role {
+        MatchRole::Registration if file_match.registration_score > 0.0 => {
+            snippet_from_match(file_match, MatchRole::Registration)
+        }
+        MatchRole::Handler if file_match.handler_score > 0.0 => {
+            snippet_from_match(file_match, MatchRole::Handler)
+        }
+        _ => snippet_from_match(file_match, MatchRole::Best),
+    }
+}
+
+fn mapper_file_matches<'a>(
+    match_set: &'a ToolMatchSet,
+    mapper_fallback: &MapperFallbackEvidence,
+) -> (
+    Option<&'a FileMatch>,
+    Option<&'a FileMatch>,
+    Vec<&'a FileMatch>,
+) {
+    let mut registration_match = None;
+    let mut handler_match = None;
+    let mut supporting_matches = vec![];
+
+    for file in &mapper_fallback.relevant_files {
+        let Some(found) = match_set
+            .source_matches
+            .iter()
+            .find(|candidate| candidate.relative_path == file.path)
+        else {
+            continue;
+        };
+        match file.role {
+            MapperRelevantFileRole::Registration => {
+                if registration_match.is_none() {
+                    registration_match = Some(found);
+                }
+            }
+            MapperRelevantFileRole::Handler => {
+                if handler_match.is_none() {
+                    handler_match = Some(found);
+                }
+            }
+            MapperRelevantFileRole::Supporting => {
+                if !supporting_matches
+                    .iter()
+                    .any(|candidate: &&FileMatch| candidate.relative_path == found.relative_path)
+                {
+                    supporting_matches.push(found);
+                }
+            }
+        }
+    }
+
+    (registration_match, handler_match, supporting_matches)
+}
+
+fn mapper_candidates(match_set: &ToolMatchSet) -> Vec<ToolMapperCandidate> {
+    match_set
+        .source_matches
+        .iter()
+        .take(MAX_MAPPER_CANDIDATES)
+        .map(|item| ToolMapperCandidate {
+            path: item.relative_path.clone(),
+            score: item.score,
+            registration_hint: item.registration_like,
+            handler_hint: item.handler_like,
+            excerpt: snippet_from_match(item, MatchRole::Best).excerpt,
+        })
+        .collect()
+}
+
+fn build_tool_evidence_pack(
+    runtime_tool: &RuntimeTool,
+    match_set: &ToolMatchSet,
+    mapper_fallback: Option<MapperFallbackEvidence>,
+) -> ToolEvidencePack {
+    let deterministic_registration = deterministic_registration_match(match_set);
+    let deterministic_handler = deterministic_handler_match(match_set);
+    let (fallback_registration, fallback_handler, fallback_supporting) = mapper_fallback
+        .as_ref()
+        .map(|fallback| mapper_file_matches(match_set, fallback))
+        .unwrap_or((None, None, vec![]));
+
+    let registration_match = fallback_registration.or(deterministic_registration);
+    let handler_match = fallback_handler.or(deterministic_handler);
+    let registration =
+        registration_match.map(|item| snippet_from_selected_match(item, MatchRole::Registration));
+    let handler = handler_match.map(|item| snippet_from_selected_match(item, MatchRole::Handler));
+
+    let mut supporting_snippets = vec![];
+    for item in fallback_supporting {
+        if registration_match
+            .map(|registration| registration.relative_path == item.relative_path)
+            .unwrap_or(false)
+            || handler_match
+                .map(|handler| handler.relative_path == item.relative_path)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        supporting_snippets.push(snippet_from_selected_match(item, MatchRole::Best));
+        if supporting_snippets.len() >= MAX_SUPPORTING_SNIPPETS {
+            break;
+        }
+    }
+    for item in &match_set.source_matches {
+        if registration_match
+            .map(|registration| registration.relative_path == item.relative_path)
+            .unwrap_or(false)
+            || handler_match
+                .map(|handler| handler.relative_path == item.relative_path)
+                .unwrap_or(false)
+            || supporting_snippets
+                .iter()
+                .any(|snippet| snippet.file_path == item.relative_path)
+        {
+            continue;
+        }
+        supporting_snippets.push(snippet_from_match(item, MatchRole::Best));
+        if supporting_snippets.len() >= MAX_SUPPORTING_SNIPPETS {
+            break;
+        }
+    }
+
+    let test_snippets = match_set
+        .test_matches
         .iter()
         .take(MAX_TEST_SNIPPETS)
-        .map(|item| snippet_from_match(root, item, MatchRole::Best))
+        .map(|item| snippet_from_match(item, MatchRole::Best))
         .collect::<Vec<_>>();
-    let doc_snippets = doc_matches
+    let doc_snippets = match_set
+        .doc_matches
         .iter()
         .take(MAX_TEST_SNIPPETS)
-        .map(|item| snippet_from_match(root, item, MatchRole::Best))
+        .map(|item| snippet_from_match(item, MatchRole::Best))
         .collect::<Vec<_>>();
 
     let confidence = compute_tool_confidence(
@@ -1450,14 +1707,30 @@ fn locate_tool_evidence(
         test_snippets.len(),
         doc_snippets.len(),
     );
-    let diagnostics = build_tool_evidence_diagnostics(
+    let mut diagnostics = build_tool_evidence_diagnostics(
         confidence,
         registration_match,
         handler_match,
         test_snippets.len(),
         doc_snippets.len(),
-        &required_inputs,
+        &match_set.required_inputs,
     );
+    if let Some(fallback) = mapper_fallback.as_ref() {
+        diagnostics.push(format!(
+            "Mapper fallback via {} returned {} relevant file(s).",
+            fallback.backend,
+            fallback.relevant_files.len()
+        ));
+        for file in &fallback.relevant_files {
+            diagnostics.push(format!(
+                "Mapper fallback: {}={} ({:.2}) - {}.",
+                file.role,
+                file.path.display(),
+                file.confidence,
+                file.why
+            ));
+        }
+    }
 
     ToolEvidencePack {
         tool_name: runtime_tool.name.clone(),
@@ -1467,10 +1740,21 @@ fn locate_tool_evidence(
         supporting_snippets,
         test_snippets,
         doc_snippets,
-        required_inputs,
+        required_inputs: match_set.required_inputs.clone(),
+        mapper_fallback,
         diagnostics,
         confidence,
     }
+}
+
+fn locate_tool_evidence(
+    root: &Path,
+    runtime_tool: &RuntimeTool,
+    index: &[IndexedFile],
+) -> ToolEvidencePack {
+    let match_set = collect_tool_match_set(runtime_tool, index);
+    let _ = root;
+    build_tool_evidence_pack(runtime_tool, &match_set, None)
 }
 
 #[derive(Debug)]
@@ -1586,6 +1870,17 @@ fn looks_like_tool_source_path(path: &Path) -> bool {
 
 fn is_registration_line(line: &str) -> bool {
     let trimmed = line.trim_start();
+    if trimmed.contains("\\\"name\\\"")
+        && (trimmed.contains("\\\"inputschema\\\"") || trimmed.contains("\\\"input_schema\\\""))
+    {
+        return false;
+    }
+    if trimmed.contains("printf")
+        && trimmed.contains("\"name\"")
+        && (trimmed.contains("\"inputschema\"") || trimmed.contains("\"input_schema\""))
+    {
+        return false;
+    }
     trimmed.contains("server.tool(")
         || trimmed.contains("server.tool (")
         || trimmed.contains("registertool")
@@ -1836,7 +2131,7 @@ fn score_indexed_file(
     })
 }
 
-fn snippet_from_match(_root: &Path, file_match: &FileMatch, role: MatchRole) -> SnippetEvidence {
+fn snippet_from_match(file_match: &FileMatch, role: MatchRole) -> SnippetEvidence {
     let lines = file_match.contents.lines().collect::<Vec<_>>();
     let (line_index, score) = match role {
         MatchRole::Best => (file_match.best_line_index, file_match.score),
@@ -2474,6 +2769,116 @@ mod tests {
             "expected confidence summary in diagnostics, got {:?}",
             pack.diagnostics
         );
+    }
+
+    #[test]
+    fn locate_tool_evidence_ignores_escaped_runtime_tool_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("execute", &["query"]),
+            &[
+                indexed_file(
+                    "bin/mock-mcp.sh",
+                    r#"printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{\"name\":\"execute\",\"description\":\"Tool execute\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"query\"]}}]}}'"#,
+                ),
+                indexed_file(
+                    "src/execute.ts",
+                    r#"export async function runExecute(args) {
+  return args.query;
+}"#,
+                ),
+            ],
+        );
+
+        assert!(
+            pack.registration.is_none(),
+            "unexpected registration: {:?}",
+            pack.registration
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("src/execute.ts"))
+        );
+        assert!(pack.confidence < LOW_CONFIDENCE_THRESHOLD);
+    }
+
+    #[test]
+    fn locate_tool_evidence_ignores_printf_runtime_tool_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("execute", &["query"]),
+            &[
+                indexed_file(
+                    "bin/mock-mcp.sh",
+                    r#"printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"execute","description":"Tool execute","inputSchema":{"type":"object","required":["query"]}}]}}'"#,
+                ),
+                indexed_file(
+                    "src/execute.ts",
+                    r#"export async function runExecute(args) {
+  return args.query;
+}"#,
+                ),
+            ],
+        );
+
+        assert!(
+            pack.registration.is_none(),
+            "unexpected registration: {:?}",
+            pack.registration
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("src/execute.ts"))
+        );
+        assert!(pack.confidence < LOW_CONFIDENCE_THRESHOLD);
+    }
+
+    #[test]
+    fn mapper_candidates_stay_narrow_for_low_confidence_tools() {
+        let mut index = vec![
+            indexed_file(
+                "src/tool_index.ts",
+                r#"export const TOOL_REGISTRY = {
+  execute: {
+    summary: "Run execute",
+    schema: {
+      query: "string",
+    },
+    run: runExecute,
+  },
+};"#,
+            ),
+            indexed_file(
+                "src/execute.ts",
+                r#"export async function runExecute(args) {
+  return args.query;
+}"#,
+            ),
+        ];
+        for idx in 0..8 {
+            index.push(indexed_file(
+                &format!("src/noise-{idx:02}.ts"),
+                &format!(r#"export const note{idx} = "execute background reference {idx}";"#),
+            ));
+        }
+
+        let match_set = collect_tool_match_set(&runtime_tool("execute", &["query"]), &index);
+        let candidates = mapper_candidates(&match_set);
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(candidates.len(), MAX_MAPPER_CANDIDATES);
+        assert!(paths.contains(&PathBuf::from("src/tool_index.ts")));
+        assert!(paths.contains(&PathBuf::from("src/execute.ts")));
+        assert!(!paths.contains(&PathBuf::from("src/noise-07.ts")));
     }
 
     #[test]

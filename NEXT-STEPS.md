@@ -51,6 +51,9 @@ Done when:
 
 ## 3. Add a tiny fallback only for low-confidence cases
 
+Status:
+- Done on 2026-03-14.
+
 Goal:
 - Add the smallest possible mapper fallback when deterministic matching is weak.
 

@@ -1,3 +1,6 @@
+use crate::pipeline::{
+    MapperFallbackEvidence, MapperRelevantFile, MapperRelevantFileRole, ToolMapperCandidate,
+};
 use crate::skillset::normalize_tool_name;
 use crate::{
     BackendContext, BackendHealthStatus, BackendSelection, ConvertBackendConfig,
@@ -178,6 +181,22 @@ pub(crate) struct BackendReviewResponse {
     pub(crate) revised_draft: Option<ToolConversionDraft>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackendMapperResponse {
+    #[serde(default)]
+    relevant_files: Vec<BackendMapperFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackendMapperFile {
+    path: String,
+    role: MapperRelevantFileRole,
+    why: String,
+    confidence: f32,
+}
+
 pub(crate) fn synthesize_tool_conversion_with_backend(
     backend_name: ConvertBackendName,
     server: &MCPServerProfile,
@@ -228,6 +247,64 @@ pub(crate) fn review_tool_conversion_with_backend(
     })
 }
 
+pub(crate) fn map_low_confidence_tool_with_backend(
+    backend_name: ConvertBackendName,
+    server: &MCPServerProfile,
+    evidence: &ToolEvidencePack,
+    candidates: &[ToolMapperCandidate],
+    timeout_seconds: u64,
+) -> Result<MapperFallbackEvidence> {
+    let backend = backend_by_name(backend_name, timeout_seconds);
+    let raw = backend.explain_tool_chunk(
+        &build_tool_mapper_prompt(server, evidence, candidates),
+        &tool_mapper_schema(),
+    )?;
+    let parsed: BackendMapperResponse = serde_json::from_str(raw.trim()).with_context(|| {
+        format!(
+            "Backend response is not valid mapper JSON: {}",
+            clipped_preview(raw.trim(), 280)
+        )
+    })?;
+
+    let known_paths = candidates
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut relevant_files = parsed
+        .relevant_files
+        .into_iter()
+        .filter_map(|file| {
+            let path = PathBuf::from(file.path.trim());
+            if path.as_os_str().is_empty() || !known_paths.contains(&path) {
+                return None;
+            }
+            let why = file.why.trim().to_string();
+            if why.is_empty() {
+                return None;
+            }
+            Some(MapperRelevantFile {
+                path,
+                role: file.role,
+                why,
+                confidence: file.confidence.clamp(0.0, 1.0),
+            })
+        })
+        .collect::<Vec<_>>();
+    relevant_files.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.role.to_string().cmp(&right.role.to_string()))
+    });
+    relevant_files.dedup_by(|left, right| left.path == right.path && left.role == right.role);
+
+    Ok(MapperFallbackEvidence {
+        backend: backend_name.to_string(),
+        relevant_files,
+    })
+}
+
 fn build_tool_synthesis_prompt(server: &MCPServerProfile, evidence: &ToolEvidencePack) -> String {
     let evidence_json = serde_json::to_string_pretty(evidence).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -259,6 +336,58 @@ Requirements:\n\
     )
 }
 
+fn build_tool_mapper_prompt(
+    server: &MCPServerProfile,
+    evidence: &ToolEvidencePack,
+    candidates: &[ToolMapperCandidate],
+) -> String {
+    let candidates_json =
+        serde_json::to_string_pretty(candidates).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "You are mapping low-confidence tool evidence to relevant source files.\n\
+Return ONLY JSON matching the provided schema.\n\
+Use ONLY the candidate files provided below.\n\
+Pick at most four files.\n\
+Prefer registration and handler files. Use supporting only when it materially explains the tool.\n\
+Do not invent files, behaviors, or line numbers.\n\
+\n\
+Server: {}\n\
+Purpose: {}\n\
+Tool name: {}\n\
+Tool description: {}\n\
+Required inputs: {}\n\
+Current deterministic confidence: {:.2}\n\
+Current diagnostics: {}\n\
+\n\
+Candidate files JSON:\n{}\n\
+\n\
+Requirements:\n\
+- relevant_files.path must exactly match one candidate path\n\
+- relevant_files.role must be one of registration, handler, supporting\n\
+- relevant_files.why must be one short grounded sentence\n\
+- relevant_files.confidence must be a 0-1 number\n\
+- omit files that do not materially help locate the tool\n",
+        server.name,
+        server.purpose,
+        evidence.tool_name,
+        evidence.runtime_tool.description.as_deref().unwrap_or(""),
+        if evidence.required_inputs.is_empty() {
+            "none".to_string()
+        } else {
+            evidence.required_inputs.join(", ")
+        },
+        evidence.confidence,
+        evidence
+            .diagnostics
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | "),
+        candidates_json
+    )
+}
+
 fn build_tool_review_prompt(
     server: &MCPServerProfile,
     evidence: &ToolEvidencePack,
@@ -287,6 +416,34 @@ If the draft is acceptable, set approved=true and findings=[].\n\
 If not, set approved=false, provide findings, and include revised_draft with fixes applied.\n",
         server.name, server.purpose, evidence_json, draft_json
     )
+}
+
+fn tool_mapper_schema() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relevant_files"],
+        "properties": {
+            "relevant_files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path", "role", "why", "confidence"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "role": {
+                            "type": "string",
+                            "enum": ["registration", "handler", "supporting"]
+                        },
+                        "why": { "type": "string" },
+                        "confidence": { "type": "number" }
+                    }
+                }
+            }
+        }
+    }))
+    .expect("mapper schema should serialize")
 }
 
 fn tool_synthesis_schema() -> String {

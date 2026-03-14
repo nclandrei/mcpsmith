@@ -21,12 +21,13 @@ pub use catalog::{
     load_catalog_sync_result,
 };
 pub use pipeline::{
-    ArtifactIdentity, ArtifactKind, EvidenceBundle, HelperScript, ResolvedArtifact, ReviewFinding,
-    ReviewReport, RunArtifacts, RunOptions, RunReport, ServerConversionBundle,
-    SnapshotMaterialization, SnippetEvidence, SourceSnapshot, SynthesisReport, ToolConversionDraft,
-    ToolEvidencePack, ToolSemanticSummary, VerifyIssue, VerifyReport, build_evidence_bundle,
-    materialize_snapshot, resolve_artifact, review_conversion_bundle, run_pipeline,
-    synthesize_from_evidence, verify_conversion_bundle,
+    ArtifactIdentity, ArtifactKind, EvidenceBundle, HelperScript, MapperFallbackEvidence,
+    MapperRelevantFile, MapperRelevantFileRole, ResolvedArtifact, ReviewFinding, ReviewReport,
+    RunArtifacts, RunOptions, RunReport, ServerConversionBundle, SnapshotMaterialization,
+    SnippetEvidence, SourceSnapshot, SynthesisReport, ToolConversionDraft, ToolEvidencePack,
+    ToolSemanticSummary, VerifyIssue, VerifyReport, build_evidence_bundle, materialize_snapshot,
+    resolve_artifact, review_conversion_bundle, run_pipeline, synthesize_from_evidence,
+    verify_conversion_bundle,
 };
 pub use skillset::build_from_bundle;
 

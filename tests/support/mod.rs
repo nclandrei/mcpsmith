@@ -218,6 +218,7 @@ fn write_mock_backend_script(path: &Path, version_label: &str) {
 fn write_mock_backend_script_with_mode(path: &Path, version_label: &str, revise_review: bool) {
     let body = r#"#!/usr/bin/env python3
 import json
+import os
 import re
 import sys
 
@@ -286,6 +287,36 @@ def build_synthesis(name: str, placeholder: bool):
         "workflow_skill": draft["workflow_skill"]
     }
 
+def mapper_paths(prompt: str):
+    return re.findall(r'"path"\s*:\s*"([^"]+)"', prompt)
+
+def build_mapper(prompt: str):
+    paths = mapper_paths(prompt)
+    registration = next(
+        (path for path in paths if any(token in path for token in ("tool_index", "manifest", "server", "index"))),
+        None,
+    )
+    handler = next(
+        (path for path in paths if any(token in path for token in ("execute", "handler", "tool")) and path != registration),
+        None,
+    )
+    relevant = []
+    if registration:
+        relevant.append({
+            "path": registration,
+            "role": "registration",
+            "why": "Contains the tool registration entry.",
+            "confidence": 0.86,
+        })
+    if handler:
+        relevant.append({
+            "path": handler,
+            "role": "handler",
+            "why": "Contains the tool implementation.",
+            "confidence": 0.91,
+        })
+    return {"relevant_files": relevant}
+
 if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v", "version"):
     print(VERSION)
     sys.exit(0)
@@ -298,6 +329,7 @@ for idx, arg in enumerate(sys.argv):
 
 prompt = sys.stdin.read()
 name = tool_name(prompt)
+capture_path = os.environ.get("MCPSMITH_BACKEND_CAPTURE_PATH")
 
 if "reviewing a generated skill draft" in prompt:
     needs_fix = REVISE_REVIEW and "TODO_REVIEW_FIX" in prompt
@@ -313,6 +345,11 @@ if "reviewing a generated skill draft" in prompt:
             "findings": [],
             "revised_draft": None
         }
+elif "mapping low-confidence tool evidence to relevant source files" in prompt:
+    if capture_path:
+        with open(capture_path, "w", encoding="utf-8") as handle:
+            handle.write(prompt)
+    payload = build_mapper(prompt)
 elif "converting one MCP tool into a standalone local skill" in prompt:
     payload = build_synthesis(name, REVISE_REVIEW)
 else:

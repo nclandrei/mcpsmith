@@ -123,6 +123,7 @@ fn sample_review(root: &Path) -> ReviewReport {
             test_snippets: vec![],
             doc_snippets: vec![],
             required_inputs: vec!["graph_scope".to_string()],
+            mapper_fallback: None,
             diagnostics: vec![],
             confidence: 0.91,
         }],

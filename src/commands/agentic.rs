@@ -134,6 +134,22 @@ fn snippet_path(snippet: Option<&SnippetEvidence>) -> String {
         .unwrap_or_else(|| "missing".to_string())
 }
 
+fn mapper_relevant_path(
+    pack: &mcpsmith_core::ToolEvidencePack,
+    role: mcpsmith_core::MapperRelevantFileRole,
+) -> String {
+    pack.mapper_fallback
+        .as_ref()
+        .and_then(|fallback| {
+            fallback
+                .relevant_files
+                .iter()
+                .find(|file| file.role == role)
+                .map(|file| file.path.display().to_string())
+        })
+        .unwrap_or_else(|| "missing".to_string())
+}
+
 fn resolve_with_catalog(
     server: &str,
     config_paths: &[PathBuf],
@@ -323,6 +339,24 @@ pub fn run_synthesize_cmd(
         println!("Synthesis for {}", result.bundle.evidence.server.id);
         println!("Backend: {}", result.bundle.backend_used);
         println!("Drafted tools: {}", result.bundle.tool_conversions.len());
+        let recovered = result
+            .bundle
+            .evidence
+            .tool_evidence
+            .iter()
+            .filter(|pack| pack.mapper_fallback.is_some())
+            .collect::<Vec<_>>();
+        if !recovered.is_empty() {
+            println!("Mapper fallback: {} tool(s)", recovered.len());
+            for pack in recovered {
+                println!(
+                    "- {}: registration={} handler={}",
+                    pack.tool_name,
+                    mapper_relevant_path(pack, mcpsmith_core::MapperRelevantFileRole::Registration),
+                    mapper_relevant_path(pack, mcpsmith_core::MapperRelevantFileRole::Handler)
+                );
+            }
+        }
         if result.bundle.blocked {
             println!("Blocked: {}", result.bundle.block_reasons.join(" | "));
         }

@@ -26,6 +26,59 @@ fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<
     );
 }
 
+fn write_low_confidence_source_layout(ctx: &TestContext, tool_name: &str) {
+    fs::create_dir_all(ctx.path("source/src")).unwrap();
+    fs::write(
+        ctx.path("source/package.json"),
+        format!(
+            r#"{{
+  "name": "@acme/{tool_name}-mcp",
+  "version": "1.2.3"
+}}
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path("source/README.md"),
+        format!("# Demo MCP\n\nThe `{tool_name}` tool runs a local query.\n"),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path("source/src/tool_index.ts"),
+        format!(
+            r#"export const TOOL_REGISTRY = {{
+  {tool_name}: {{
+    summary: "Run {tool_name}",
+    schema: {{
+      query: "string",
+    }},
+    run: run{title_case},
+  }},
+}};"#,
+            title_case = "Execute"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        ctx.path(format!("source/src/{tool_name}.ts")),
+        format!(
+            r#"export async function run{title_case}(args) {{
+  return args.query;
+}}"#,
+            title_case = "Execute"
+        ),
+    )
+    .unwrap();
+    for idx in 0..8 {
+        fs::write(
+            ctx.path(format!("source/src/noise-{idx:02}.ts")),
+            format!(r#"export const note{idx} = "{tool_name} background reference {idx}";"#),
+        )
+        .unwrap();
+    }
+}
+
 fn parse_json_output(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).unwrap()
 }
@@ -302,6 +355,133 @@ fn test_mcpsmith_evidence_human_output_explains_confidence() {
         .stdout(predicate::str::contains("tests=1"))
         .stdout(predicate::str::contains("docs=1"))
         .stdout(predicate::str::contains("Confidence: high"));
+}
+
+#[test]
+fn test_mcpsmith_synthesize_uses_mapper_fallback_for_low_confidence_evidence() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("source/bin/mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+    let mapper_prompt = ctx.path("mapper-prompt.txt");
+
+    write_low_confidence_source_layout(&ctx, "execute");
+    fs::create_dir_all(mock_mcp.parent().unwrap()).unwrap();
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    let synthesis = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .env("MCPSMITH_BACKEND_CAPTURE_PATH", &mapper_prompt)
+            .args([
+                "synthesize",
+                "playwright",
+                "--json",
+                "--backend",
+                "codex",
+                "--config",
+            ])
+            .arg(&config_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let pack = &synthesis["result"]["bundle"]["evidence"]["tool_evidence"][0];
+    assert_eq!(pack["tool_name"].as_str().unwrap(), "execute");
+    assert!(pack["confidence"].as_f64().unwrap() >= 0.75);
+    assert_eq!(
+        pack["registration"]["file_path"].as_str().unwrap(),
+        "src/tool_index.ts"
+    );
+    assert_eq!(
+        pack["handler"]["file_path"].as_str().unwrap(),
+        "src/execute.ts"
+    );
+    assert_eq!(
+        pack["mapper_fallback"]["backend"].as_str().unwrap(),
+        "codex"
+    );
+    assert_eq!(
+        pack["mapper_fallback"]["relevant_files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let prompt = fs::read_to_string(&mapper_prompt).unwrap();
+    assert!(prompt.contains("src/tool_index.ts"));
+    assert!(prompt.contains("src/execute.ts"));
+    assert!(!prompt.contains("src/noise-07.ts"));
+}
+
+#[test]
+fn test_mcpsmith_synthesize_human_output_reports_mapper_fallback() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("source/bin/mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_low_confidence_source_layout(&ctx, "execute");
+    fs::create_dir_all(mock_mcp.parent().unwrap()).unwrap();
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["synthesize", "playwright", "--backend", "codex", "--config"])
+        .arg(&config_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Mapper fallback: 1 tool(s)"))
+        .stdout(predicate::str::contains("registration=src/tool_index.ts"))
+        .stdout(predicate::str::contains("handler=src/execute.ts"));
+}
+
+#[test]
+fn test_mcpsmith_synthesize_skips_mapper_fallback_for_high_confidence_evidence() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+    let mapper_prompt = ctx.path("mapper-prompt.txt");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    let synthesis = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .env("MCPSMITH_BACKEND_CAPTURE_PATH", &mapper_prompt)
+            .args([
+                "synthesize",
+                "playwright",
+                "--json",
+                "--backend",
+                "codex",
+                "--config",
+            ])
+            .arg(&config_path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let pack = &synthesis["result"]["bundle"]["evidence"]["tool_evidence"][0];
+    assert!(pack.get("mapper_fallback").is_none());
+    assert!(
+        fs::read_to_string(&mapper_prompt)
+            .map(|body| body.trim().is_empty())
+            .unwrap_or(true)
+    );
 }
 
 #[test]
