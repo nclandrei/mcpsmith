@@ -13,7 +13,6 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, hash_map::DefaultHasher};
@@ -1366,12 +1365,25 @@ fn locate_tool_evidence(
     index: &[IndexedFile],
 ) -> ToolEvidencePack {
     let search_terms = tool_search_terms(&runtime_tool.name);
+    let mut required_inputs = runtime_tool
+        .input_schema
+        .as_ref()
+        .and_then(|schema| schema.get("required"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    required_inputs.sort();
+    required_inputs.dedup();
+
     let mut source_matches = vec![];
     let mut test_matches = vec![];
     let mut doc_matches = vec![];
 
     for indexed in index {
-        if let Some(match_info) = score_indexed_file(indexed, &search_terms) {
+        if let Some(match_info) = score_indexed_file(indexed, &search_terms, &required_inputs) {
             if is_test_path(&indexed.relative_path) {
                 test_matches.push(match_info);
             } else if is_doc_path(&indexed.relative_path) {
@@ -1386,67 +1398,77 @@ fn locate_tool_evidence(
     test_matches.sort_by(|left, right| right.score.total_cmp(&left.score));
     doc_matches.sort_by(|left, right| right.score.total_cmp(&left.score));
 
-    let registration = source_matches
+    let registration_match = source_matches
         .iter()
-        .find(|item| item.registration_like)
-        .map(|item| snippet_from_match(root, item));
-    let handler = source_matches
+        .filter(|item| item.registration_like)
+        .max_by(|left, right| left.registration_score.total_cmp(&right.registration_score));
+    let handler_match = source_matches
         .iter()
-        .find(|item| !item.registration_like)
-        .map(|item| snippet_from_match(root, item))
+        .filter(|item| {
+            item.handler_like
+                && registration_match
+                    .map(|registration| registration.relative_path != item.relative_path)
+                    .unwrap_or(true)
+        })
+        .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
         .or_else(|| {
             source_matches
-                .first()
-                .map(|item| snippet_from_match(root, item))
-        });
+                .iter()
+                .filter(|item| item.handler_like)
+                .max_by(|left, right| left.handler_score.total_cmp(&right.handler_score))
+        })
+        .or_else(|| {
+            source_matches
+                .iter()
+                .filter(|item| {
+                    registration_match
+                        .map(|registration| registration.relative_path != item.relative_path)
+                        .unwrap_or(true)
+                })
+                .max_by(|left, right| left.score.total_cmp(&right.score))
+        })
+        .or_else(|| source_matches.first());
+    let registration =
+        registration_match.map(|item| snippet_from_match(root, item, MatchRole::Registration));
+    let handler = handler_match.map(|item| snippet_from_match(root, item, MatchRole::Handler));
     let supporting_snippets = source_matches
         .iter()
-        .skip(1)
+        .filter(|item| {
+            registration_match
+                .map(|registration| registration.relative_path != item.relative_path)
+                .unwrap_or(true)
+                && handler_match
+                    .map(|handler| handler.relative_path != item.relative_path)
+                    .unwrap_or(true)
+        })
         .take(MAX_SUPPORTING_SNIPPETS)
-        .map(|item| snippet_from_match(root, item))
+        .map(|item| snippet_from_match(root, item, MatchRole::Best))
         .collect::<Vec<_>>();
     let test_snippets = test_matches
         .iter()
         .take(MAX_TEST_SNIPPETS)
-        .map(|item| snippet_from_match(root, item))
+        .map(|item| snippet_from_match(root, item, MatchRole::Best))
         .collect::<Vec<_>>();
     let doc_snippets = doc_matches
         .iter()
         .take(MAX_TEST_SNIPPETS)
-        .map(|item| snippet_from_match(root, item))
+        .map(|item| snippet_from_match(root, item, MatchRole::Best))
         .collect::<Vec<_>>();
 
-    let mut required_inputs = runtime_tool
-        .input_schema
-        .as_ref()
-        .and_then(|schema| schema.get("required"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    required_inputs.sort();
-    required_inputs.dedup();
-
-    let signals = [
-        registration.is_some(),
-        handler.is_some(),
-        !test_snippets.is_empty(),
-        !doc_snippets.is_empty(),
-    ]
-    .into_iter()
-    .filter(|flag| *flag)
-    .count();
-    let confidence = (signals as f32 / 4.0).max(0.25);
-
-    let mut diagnostics = vec![];
-    if registration.is_none() {
-        diagnostics.push("No registration-like source match was found.".to_string());
-    }
-    if handler.is_none() {
-        diagnostics.push("No handler-like source match was found.".to_string());
-    }
+    let confidence = compute_tool_confidence(
+        registration_match,
+        handler_match,
+        test_snippets.len(),
+        doc_snippets.len(),
+    );
+    let diagnostics = build_tool_evidence_diagnostics(
+        confidence,
+        registration_match,
+        handler_match,
+        test_snippets.len(),
+        doc_snippets.len(),
+        &required_inputs,
+    );
 
     ToolEvidencePack {
         tool_name: runtime_tool.name.clone(),
@@ -1463,50 +1485,229 @@ fn locate_tool_evidence(
 }
 
 #[derive(Debug)]
+struct ToolSearchTerms {
+    raw_terms: Vec<String>,
+    compact_terms: Vec<String>,
+    compact_tool: String,
+}
+
+#[derive(Debug)]
 struct FileMatch {
     relative_path: PathBuf,
     score: f32,
     registration_like: bool,
-    line_index: usize,
+    registration_score: f32,
+    handler_score: f32,
+    handler_like: bool,
+    best_line_index: usize,
+    registration_line_index: usize,
+    handler_line_index: usize,
     contents: String,
 }
 
-fn tool_search_terms(tool_name: &str) -> Vec<String> {
-    let mut out = vec![tool_name.to_ascii_lowercase()];
-    out.push(tool_name.replace('_', "-").to_ascii_lowercase());
-    out.push(tool_name.replace('_', " ").to_ascii_lowercase());
-    out.sort();
-    out.dedup();
-    out
+#[derive(Debug, Clone, Copy)]
+enum MatchRole {
+    Best,
+    Registration,
+    Handler,
 }
 
-fn score_indexed_file(indexed: &IndexedFile, search_terms: &[String]) -> Option<FileMatch> {
-    let haystack = indexed.contents.to_ascii_lowercase();
-    let mut score = 0.0f32;
-    let mut line_index = None;
-    for term in search_terms {
-        let term_score = haystack.matches(term).count() as f32;
-        if term_score > 0.0 {
-            score += term_score * 3.0;
-            if line_index.is_none() {
-                line_index = indexed
-                    .contents
-                    .lines()
-                    .enumerate()
-                    .find(|(_, line)| line.to_ascii_lowercase().contains(term))
-                    .map(|(idx, _)| idx);
-            }
-        }
+fn tool_search_terms(tool_name: &str) -> ToolSearchTerms {
+    let normalized = tool_name.to_ascii_lowercase();
+    let mut raw_terms = vec![
+        normalized.clone(),
+        normalized.replace(['-', ' '], "_"),
+        normalized.replace(['_', ' '], "-"),
+        normalized.replace(['_', '-'], " "),
+    ];
+    raw_terms.retain(|term| !term.is_empty());
+    raw_terms.sort();
+    raw_terms.dedup();
+
+    let compact_tool = compact_ascii(tool_name);
+    let mut compact_terms = vec![compact_tool.clone()];
+    compact_terms.retain(|term| !term.is_empty() && !raw_terms.iter().any(|raw| raw == term));
+    compact_terms.sort();
+    compact_terms.dedup();
+
+    ToolSearchTerms {
+        raw_terms,
+        compact_terms,
+        compact_tool,
     }
-    if score == 0.0 {
+}
+
+fn compact_ascii(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn unique_term_hits(text: &str, compact_text: &str, search_terms: &ToolSearchTerms) -> usize {
+    search_terms
+        .raw_terms
+        .iter()
+        .filter(|term| text.contains(term.as_str()))
+        .count()
+        + search_terms
+            .compact_terms
+            .iter()
+            .filter(|term| compact_text.contains(term.as_str()))
+            .count()
+}
+
+fn exact_path_component_match(path: &Path, compact_tool: &str) -> bool {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .map(|stem| compact_ascii(stem) == compact_tool)
+        .unwrap_or(false)
+        || path
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .any(|component| {
+                compact_ascii(component.as_os_str().to_string_lossy().as_ref()) == compact_tool
+            })
+}
+
+fn is_registration_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.contains("server.tool(")
+        || trimmed.contains("server.tool (")
+        || trimmed.contains("registertool")
+        || trimmed.contains("register_tool")
+        || trimmed.contains("@mcp.tool")
+        || trimmed.contains("mcp.tool(")
+        || (trimmed.contains("name")
+            && (trimmed.contains("description")
+                || trimmed.contains("inputschema")
+                || trimmed.contains("input_schema")))
+}
+
+fn is_handler_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("export async function ")
+        || trimmed.starts_with("export function ")
+        || trimmed.starts_with("async function ")
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("const ") && trimmed.contains(" = async")
+        || trimmed.starts_with("let ") && trimmed.contains(" = async")
+        || trimmed.starts_with("async def ")
+        || trimmed.starts_with("def ")
+        || trimmed.starts_with("pub async fn ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("async fn ")
+        || trimmed.starts_with("fn ")
+}
+
+fn has_registration_context(contents: &str, required_inputs: &[String]) -> bool {
+    contents.contains("server.tool")
+        || contents.contains("registertool")
+        || contents.contains("register_tool")
+        || contents.contains("@mcp.tool")
+        || contents.contains("mcp.tool(")
+        || contents.contains("inputschema")
+        || contents.contains("input_schema")
+        || required_inputs.iter().any(|input| {
+            let quoted = format!("\"{}\"", input.to_ascii_lowercase());
+            contents.contains(&quoted)
+        })
+}
+
+fn score_indexed_file(
+    indexed: &IndexedFile,
+    search_terms: &ToolSearchTerms,
+    required_inputs: &[String],
+) -> Option<FileMatch> {
+    let path_text = indexed.relative_path.to_string_lossy().to_ascii_lowercase();
+    let compact_path = compact_ascii(&path_text);
+    let haystack = indexed.contents.to_ascii_lowercase();
+    let compact_haystack = compact_ascii(&indexed.contents);
+    let path_hits = unique_term_hits(&path_text, &compact_path, search_terms);
+    let content_hits = unique_term_hits(&haystack, &compact_haystack, search_terms);
+    let exact_path_match =
+        exact_path_component_match(&indexed.relative_path, &search_terms.compact_tool);
+    if path_hits == 0 && content_hits == 0 && !exact_path_match {
         return None;
     }
 
-    let registration_like = Regex::new(r#"(?i)(tool|register|name|description|schema)"#)
-        .expect("valid regex")
-        .is_match(&indexed.contents);
+    let file_support = path_hits > 0 || content_hits > 0 || exact_path_match;
+    let required_input_hits = required_inputs
+        .iter()
+        .filter(|input| haystack.contains(&input.to_ascii_lowercase()))
+        .count();
+    let has_handler_context = indexed
+        .contents
+        .lines()
+        .any(|line| is_handler_line(&line.to_ascii_lowercase()));
+
+    let mut best_line_index = 0usize;
+    let mut best_line_score = 0.0f32;
+    let mut registration_line_index = 0usize;
+    let mut best_registration_line_score = 0.0f32;
+    let mut handler_line_index = 0usize;
+    let mut best_handler_line_score = 0.0f32;
+
+    for (idx, line) in indexed.contents.lines().enumerate() {
+        let line_lower = line.to_ascii_lowercase();
+        let compact_line = compact_ascii(line);
+        let line_hits = unique_term_hits(&line_lower, &compact_line, search_terms);
+        let line_required_input_hits = required_inputs
+            .iter()
+            .filter(|input| line_lower.contains(&input.to_ascii_lowercase()))
+            .count();
+        let base_score = line_hits as f32 * 2.5 + line_required_input_hits as f32;
+        let registration_line = is_registration_line(&line_lower);
+        let handler_line = is_handler_line(&line_lower);
+        let general_score = base_score
+            + if registration_line || handler_line {
+                2.0 + if file_support { 1.0 } else { 0.0 }
+            } else {
+                0.0
+            };
+        if general_score > best_line_score {
+            best_line_score = general_score;
+            best_line_index = idx;
+        }
+
+        let registration_score = if registration_line && file_support {
+            base_score + 6.0 + line_required_input_hits as f32 * 0.5
+        } else {
+            0.0
+        };
+        if registration_score > best_registration_line_score {
+            best_registration_line_score = registration_score;
+            registration_line_index = idx;
+        }
+
+        let handler_score = if handler_line && file_support {
+            base_score + 6.0
+        } else {
+            0.0
+        };
+        if handler_score > best_handler_line_score {
+            best_handler_line_score = handler_score;
+            handler_line_index = idx;
+        }
+    }
+
+    let registration_like = best_registration_line_score > 0.0
+        || (file_support && has_registration_context(&haystack, required_inputs));
+    let handler_like = best_handler_line_score > 0.0 || (file_support && has_handler_context);
+
+    let mut score = content_hits as f32 * 2.0 + path_hits as f32 * 2.5 + best_line_score;
+    if exact_path_match {
+        score += 4.0;
+    }
     if registration_like {
         score += 2.0;
+    }
+    if handler_like {
+        score += 2.0;
+    }
+    if required_input_hits > 0 {
+        score += required_input_hits as f32 * 0.5;
     }
     if is_test_path(&indexed.relative_path) {
         score += 1.0;
@@ -1519,24 +1720,149 @@ fn score_indexed_file(indexed: &IndexedFile, search_terms: &[String]) -> Option<
         relative_path: indexed.relative_path.clone(),
         score,
         registration_like,
-        line_index: line_index.unwrap_or(0),
+        registration_score: if registration_like {
+            score + best_registration_line_score + required_input_hits as f32 * 0.5
+        } else {
+            0.0
+        },
+        handler_score: if handler_like {
+            score
+                + best_handler_line_score
+                + if path_hits > 0 { 1.5 } else { 0.0 }
+                + if exact_path_match { 2.5 } else { 0.0 }
+        } else {
+            0.0
+        },
+        handler_like,
+        best_line_index,
+        registration_line_index,
+        handler_line_index,
         contents: indexed.contents.clone(),
     })
 }
 
-fn snippet_from_match(root: &Path, file_match: &FileMatch) -> SnippetEvidence {
-    let _ = root;
+fn snippet_from_match(_root: &Path, file_match: &FileMatch, role: MatchRole) -> SnippetEvidence {
     let lines = file_match.contents.lines().collect::<Vec<_>>();
-    let start = file_match.line_index.saturating_sub(4);
-    let end = (file_match.line_index + 5).min(lines.len());
+    let (line_index, score) = match role {
+        MatchRole::Best => (file_match.best_line_index, file_match.score),
+        MatchRole::Registration => (
+            file_match.registration_line_index,
+            file_match.registration_score,
+        ),
+        MatchRole::Handler => (file_match.handler_line_index, file_match.handler_score),
+    };
+    let start = line_index.saturating_sub(4);
+    let end = (line_index + 5).min(lines.len());
     let excerpt = lines[start..end].join("\n");
     SnippetEvidence {
         file_path: file_match.relative_path.clone(),
         start_line: start + 1,
         end_line: end,
         excerpt,
-        score: file_match.score,
+        score,
     }
+}
+
+fn compute_tool_confidence(
+    registration: Option<&FileMatch>,
+    handler: Option<&FileMatch>,
+    test_count: usize,
+    doc_count: usize,
+) -> f32 {
+    let mut confidence: f32 = 0.15;
+    if registration.is_some() {
+        confidence += 0.30;
+    }
+    if handler.is_some() {
+        confidence += 0.30;
+    }
+    if test_count > 0 {
+        confidence += 0.12;
+    }
+    if doc_count > 0 {
+        confidence += 0.08;
+    }
+    if registration
+        .map(|item| item.registration_score >= 14.0)
+        .unwrap_or(false)
+    {
+        confidence += 0.05;
+    }
+    if handler
+        .map(|item| item.handler_score >= 14.0)
+        .unwrap_or(false)
+    {
+        confidence += 0.05;
+    }
+    if registration
+        .zip(handler)
+        .map(|(reg, hand)| reg.relative_path != hand.relative_path)
+        .unwrap_or(false)
+    {
+        confidence += 0.05;
+    }
+    confidence.clamp(0.15, 0.95)
+}
+
+fn confidence_label(confidence: f32) -> &'static str {
+    if confidence >= 0.85 {
+        "high"
+    } else if confidence >= 0.60 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+fn build_tool_evidence_diagnostics(
+    confidence: f32,
+    registration: Option<&FileMatch>,
+    handler: Option<&FileMatch>,
+    test_count: usize,
+    doc_count: usize,
+    required_inputs: &[String],
+) -> Vec<String> {
+    let registration_text = registration
+        .map(|item| {
+            format!(
+                "{} ({:.2})",
+                item.relative_path.display(),
+                item.registration_score
+            )
+        })
+        .unwrap_or_else(|| "missing".to_string());
+    let handler_text = handler
+        .map(|item| {
+            format!(
+                "{} ({:.2})",
+                item.relative_path.display(),
+                item.handler_score
+            )
+        })
+        .unwrap_or_else(|| "missing".to_string());
+
+    let mut diagnostics = vec![format!(
+        "Confidence: {} ({:.2}); registration={}, handler={}, tests={}, docs={}.",
+        confidence_label(confidence),
+        confidence,
+        registration_text,
+        handler_text,
+        test_count,
+        doc_count
+    )];
+    if !required_inputs.is_empty() {
+        diagnostics.push(format!(
+            "Required inputs from runtime schema: {}.",
+            required_inputs.join(", ")
+        ));
+    }
+    if registration.is_none() {
+        diagnostics.push("No registration-like source match was found.".to_string());
+    }
+    if handler.is_none() {
+        diagnostics.push("No handler-like source match was found.".to_string());
+    }
+    diagnostics
 }
 
 fn is_test_path(path: &Path) -> bool {
@@ -1741,6 +2067,7 @@ fn url_encode_path_segment(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::{ConversionRecommendation, PermissionLevel, SourceGrounding};
+    use serde_json::json;
 
     fn sample_server(root: &Path) -> MCPServerProfile {
         MCPServerProfile {
@@ -1771,6 +2098,28 @@ mod tests {
                 inspected_urls: vec![],
                 derivation_evidence: vec![],
             },
+        }
+    }
+
+    fn runtime_tool(name: &str, required_inputs: &[&str]) -> RuntimeTool {
+        RuntimeTool {
+            name: name.to_string(),
+            description: Some(format!("Tool {name}")),
+            input_schema: Some(json!({
+                "type": "object",
+                "required": required_inputs,
+                "properties": required_inputs
+                    .iter()
+                    .map(|input| ((*input).to_string(), json!({ "type": "string" })))
+                    .collect::<serde_json::Map<String, serde_json::Value>>()
+            })),
+        }
+    }
+
+    fn indexed_file(path: &str, contents: &str) -> IndexedFile {
+        IndexedFile {
+            relative_path: PathBuf::from(path),
+            contents: contents.to_string(),
         }
     }
 
@@ -1913,6 +2262,97 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| issue.message.contains("no source citations"))
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_matches_handler_from_tool_path_and_symbol_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("list_pages", &["browser_id"]),
+            &[
+                indexed_file(
+                    "src/index.ts",
+                    r#"server.tool("list_pages", { description: "List pages", inputSchema: { type: "object", required: ["browser_id"] } }, async (args) => listPages(args));"#,
+                ),
+                indexed_file(
+                    "src/list-pages.ts",
+                    r#"export async function listPages(args) {
+  return getOpenPages(args.browser_id);
+}"#,
+                ),
+                indexed_file(
+                    "tests/list-pages.spec.ts",
+                    r#"it("lists pages", async () => {
+  await callTool("list_pages", { browser_id: "demo" });
+});"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.registration
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("src/index.ts"))
+        );
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("src/list-pages.ts"))
+        );
+        assert_eq!(pack.required_inputs, vec!["browser_id".to_string()]);
+    }
+
+    #[test]
+    fn locate_tool_evidence_matches_camel_case_handler_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("read_graph", &[]),
+            &[
+                indexed_file(
+                    "src/server.ts",
+                    r#"server.tool("read_graph", { description: "Read graph" }, async () => readGraph());"#,
+                ),
+                indexed_file(
+                    "src/handlers.ts",
+                    r#"export async function readGraph() {
+  return loadGraph();
+}"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            pack.handler
+                .as_ref()
+                .map(|snippet| snippet.file_path.clone()),
+            Some(PathBuf::from("src/handlers.ts"))
+        );
+    }
+
+    #[test]
+    fn locate_tool_evidence_reports_confidence_reasoning() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = locate_tool_evidence(
+            dir.path(),
+            &runtime_tool("archive_notes", &[]),
+            &[indexed_file(
+                "README.md",
+                "The archive_notes tool stores notes for later retrieval.",
+            )],
+        );
+
+        assert!(pack.confidence <= 0.35);
+        assert!(
+            pack.diagnostics
+                .iter()
+                .any(|line| line.contains("Confidence:")),
+            "expected confidence summary in diagnostics, got {:?}",
+            pack.diagnostics
         );
     }
 }

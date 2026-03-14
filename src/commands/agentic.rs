@@ -1,10 +1,10 @@
 use crate::config::{Config as AppConfig, ConvertBackendPreference as AppBackendPreference};
 use anyhow::{Context, Result, bail};
 use mcpsmith_core::{
-    CatalogProvider, CatalogSyncOptions, RunOptions, ServerConversionBundle, VerifyReport,
-    catalog_stats, catalog_sync, load_cached_catalog_sync_result, load_catalog_sync_result,
-    materialize_snapshot, resolve_artifact, review_conversion_bundle, run_pipeline,
-    synthesize_from_evidence, verify_conversion_bundle,
+    CatalogProvider, CatalogSyncOptions, RunOptions, ServerConversionBundle, SnippetEvidence,
+    VerifyReport, catalog_stats, catalog_sync, load_cached_catalog_sync_result,
+    load_catalog_sync_result, materialize_snapshot, resolve_artifact, review_conversion_bundle,
+    run_pipeline, synthesize_from_evidence, verify_conversion_bundle,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -116,6 +116,22 @@ fn load_json_payload<T: DeserializeOwned>(path: &Path) -> Result<T> {
 
 fn load_cached_catalog() -> Option<mcpsmith_core::CatalogSyncResult> {
     load_cached_catalog_sync_result(None).ok()
+}
+
+fn confidence_label(confidence: f32) -> &'static str {
+    if confidence >= 0.85 {
+        "high"
+    } else if confidence >= 0.60 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+fn snippet_path(snippet: Option<&SnippetEvidence>) -> String {
+    snippet
+        .map(|match_info| match_info.file_path.display().to_string())
+        .unwrap_or_else(|| "missing".to_string())
 }
 
 fn resolve_with_catalog(
@@ -264,12 +280,18 @@ pub fn run_evidence_cmd(
         println!("Evidence bundle for {}", result.server.id);
         for pack in &result.tool_evidence {
             println!(
-                "- {}: confidence={:.2} registration={} handler={}",
+                "- {}: confidence={:.2} ({}) registration={} handler={} tests={} docs={}",
                 pack.tool_name,
                 pack.confidence,
-                pack.registration.is_some(),
-                pack.handler.is_some()
+                confidence_label(pack.confidence),
+                snippet_path(pack.registration.as_ref()),
+                snippet_path(pack.handler.as_ref()),
+                pack.test_snippets.len(),
+                pack.doc_snippets.len()
             );
+            if let Some(summary) = pack.diagnostics.first() {
+                println!("  {summary}");
+            }
         }
     })
 }

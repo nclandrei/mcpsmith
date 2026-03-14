@@ -282,6 +282,29 @@ fn test_mcpsmith_staged_pipeline_accepts_prior_artifacts() {
 }
 
 #[test]
+fn test_mcpsmith_evidence_human_output_explains_confidence() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .args(["evidence", "playwright", "--config"])
+        .arg(&config_path)
+        .args(["--tool", "execute"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("confidence="))
+        .stdout(predicate::str::contains("(high)"))
+        .stdout(predicate::str::contains("tests=1"))
+        .stdout(predicate::str::contains("docs=1"))
+        .stdout(predicate::str::contains("Confidence: high"));
+}
+
+#[test]
 fn test_mcpsmith_bare_one_shot_dry_run_writes_preview_and_keeps_config() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();
