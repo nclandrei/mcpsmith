@@ -127,12 +127,14 @@ reused by another agent with `--from-resolve`, `--from-snapshot`,
 Common help entrypoints:
 
 - `cargo run --quiet -- --help`
+- `cargo run --quiet -- discover --help`
 - `cargo run --quiet -- resolve --help`
 - `cargo run --quiet -- evidence --help`
 - `cargo run --quiet -- run --help`
 
 Common commands:
 
+- `cargo run --quiet -- discover --json --config "$TMPDIR/mcp.json"`
 - `cargo run --quiet -- <server> --dry-run --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
 - `cargo run --quiet -- run <server> --json --config "$TMPDIR/mcp.json" --skills-dir "$TMPDIR/skills"`
 - `cargo run --quiet -- resolve <server> --json --config "$TMPDIR/mcp.json"`
@@ -148,6 +150,9 @@ Common commands:
 
 - Local MCP config entries from `--config` or discovered config files.
 - API-backed registry data used for catalog/census and fallback enrichment.
+
+Use `cargo run --quiet -- discover` when you want to see the locally configured
+MCP inventory before choosing a server for `resolve` or `run`.
 
 Catalog commands:
 

@@ -7,11 +7,14 @@ use std::path::PathBuf;
 const LONG_ABOUT: &str = "\
 Convert installed MCP servers into source-grounded, agent-native skills.
 
+Inspect local MCP inventory:
+  mcpsmith discover [--json]
+
 One-shot conversion:
   mcpsmith <server> [--dry-run] [--json]
   mcpsmith run <server> [--dry-run] [--json]
 
-Inspectable staged flow:
+Inspection and staged flow:
   mcpsmith catalog sync
   mcpsmith resolve <server>
   mcpsmith snapshot <server> | --from-resolve <path>
@@ -31,6 +34,7 @@ Defaults:
   Installed skills: ~/.agents/skills/
 
 Examples:
+  mcpsmith discover --config /tmp/mcp.json
   mcpsmith playwright --dry-run --config /tmp/mcp.json --skills-dir /tmp/skills
   mcpsmith resolve playwright --json --config /tmp/mcp.json
   mcpsmith snapshot --from-resolve .codex-runtime/stages/resolve-playwright.json
@@ -62,6 +66,20 @@ const CATALOG_STATS_LONG_ABOUT: &str = "\
 Report catalog statistics from a saved snapshot or from a fresh sync.
 
 Use --from when you want stats for a specific catalog artifact instead of a new network fetch.
+";
+
+const DISCOVER_LONG_ABOUT: &str = "\
+Discover installed MCP servers from local config files.
+
+Searches the standard local MCP config locations plus any --config paths you provide.
+Use this before resolve or run when you want to see exactly which MCP entries mcpsmith can inspect.
+";
+
+const DISCOVER_AFTER_HELP: &str = "\
+Examples:
+  mcpsmith discover
+  mcpsmith discover --config /tmp/mcp.json
+  mcpsmith discover --json --config /tmp/mcp.json
 ";
 
 const RESOLVE_LONG_ABOUT: &str = "\
@@ -198,6 +216,15 @@ enum Commands {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommands,
+    },
+    #[command(alias = "list", long_about = DISCOVER_LONG_ABOUT, after_help = DISCOVER_AFTER_HELP)]
+    Discover {
+        /// Emit machine-readable JSON instead of the default human summary
+        #[arg(long)]
+        json: bool,
+        /// Repeat to inspect multiple MCP config files.
+        #[arg(long = "config", value_name = "PATH")]
+        config: Vec<PathBuf>,
     },
     #[command(long_about = RESOLVE_LONG_ABOUT, after_help = RESOLVE_AFTER_HELP)]
     Resolve {
@@ -364,6 +391,9 @@ fn main() -> anyhow::Result<()> {
                 commands::agentic::run_catalog_stats_cmd(json, from.as_deref())?;
             }
         },
+        Some(Commands::Discover { json, config }) => {
+            commands::agentic::run_discover_cmd(json, &config)?;
+        }
         Some(Commands::Resolve {
             server,
             json,

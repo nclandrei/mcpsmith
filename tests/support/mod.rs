@@ -78,15 +78,7 @@ impl TestContext {
 
         let mut servers = Map::new();
         servers.insert(server_name.to_string(), Value::Object(server));
-
-        let mut root = Map::new();
-        root.insert("mcpServers".to_string(), Value::Object(servers));
-
-        fs::write(
-            self.config_path(),
-            serde_json::to_string_pretty(&Value::Object(root)).unwrap(),
-        )
-        .unwrap();
+        self.write_mcp_servers(servers);
     }
 
     pub fn write_remote_server_config(&self, server_name: &str, url: &str) {
@@ -95,7 +87,10 @@ impl TestContext {
 
         let mut servers = Map::new();
         servers.insert(server_name.to_string(), Value::Object(server));
+        self.write_mcp_servers(servers);
+    }
 
+    pub fn write_mcp_servers(&self, servers: Map<String, Value>) {
         let mut root = Map::new();
         root.insert("mcpServers".to_string(), Value::Object(servers));
 

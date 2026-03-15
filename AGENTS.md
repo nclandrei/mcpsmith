@@ -29,6 +29,7 @@ only and must not be modified from this repo workflow.
 ## Command matrix
 
 - Overview: `cargo run --quiet --`
+- Local discovery: `cargo run --quiet -- discover --json`
 - Root help: `cargo run --quiet -- --help`
 - One-shot conversion: `cargo run --quiet -- <server>`
 - Full one-shot with explicit subcommand: `cargo run --quiet -- run <server>`
@@ -43,6 +44,7 @@ only and must not be modified from this repo workflow.
 
 What each stage emits:
 
+- `discover`: local MCP inventory from discovered config files and any explicit `--config` paths
 - `resolve`: exact artifact identity and block reason if source is unavailable
 - `snapshot`: local source root for the pinned artifact
 - `evidence`: per-tool registration, handler, test/doc citations, and confidence

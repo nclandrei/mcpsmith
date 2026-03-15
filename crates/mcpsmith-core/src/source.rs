@@ -134,6 +134,15 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
     })
 }
 
+pub fn discover_inventory(additional_paths: &[PathBuf]) -> Result<ConvertInventory> {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let sources = default_sources(&home, &cwd, additional_paths);
+    discover_from_sources(&sources)
+}
+
 fn parse_source_root(raw: &str, path: &Path) -> Result<Value> {
     if let Ok(root) = serde_json::from_str::<Value>(raw) {
         return Ok(root);

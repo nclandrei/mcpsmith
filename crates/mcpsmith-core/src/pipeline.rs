@@ -5,10 +5,9 @@ use crate::backend::{
 use crate::install::{remove_server_from_config, rollback_server_skill_files};
 use crate::runtime::introspect_tool_specs;
 use crate::skillset::{build_from_bundle, default_agents_skills_dir};
-use crate::source::{default_sources, discover_from_sources};
 use crate::{
     CatalogSourceResolutionStatus, CatalogSyncResult, ConvertBackendConfig, ConvertBackendName,
-    MCPServerProfile, RuntimeTool, SourceKind, WorkflowSkillSpec,
+    MCPServerProfile, RuntimeTool, SourceKind, WorkflowSkillSpec, discover_inventory,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -299,12 +298,7 @@ fn inspect_installed_server(
     server_selector: &str,
     additional_paths: &[PathBuf],
 ) -> Result<MCPServerProfile> {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let sources = default_sources(&home, &cwd, additional_paths);
-    let inventory = discover_from_sources(&sources)?;
+    let inventory = discover_inventory(additional_paths)?;
     resolve_server(&inventory.servers, server_selector)
 }
 

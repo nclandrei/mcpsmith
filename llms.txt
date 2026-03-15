@@ -14,6 +14,7 @@
 
 ## Core commands
 - `cargo run --quiet -- --help`
+- `cargo run --quiet -- discover --json --config "$TMPDIR/mcp.json"`
 - `cargo run --quiet -- run --help`
 - `cargo run --quiet -- catalog sync`
 - `cargo run --quiet -- resolve <server> --json --config "$TMPDIR/mcp.json"`

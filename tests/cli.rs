@@ -1,7 +1,7 @@
 mod support;
 
 use predicates::prelude::*;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -132,6 +132,51 @@ impl Drop for StubRegistryServer {
     }
 }
 
+struct StrictOfficialLimitRegistryServer {
+    base_url: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl StrictOfficialLimitRegistryServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        handle_strict_official_registry_request(&mut stream);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            base_url: format!("http://{}", addr),
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for StrictOfficialLimitRegistryServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn handle_registry_request(stream: &mut TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
 
@@ -219,6 +264,82 @@ fn handle_registry_request(stream: &mut TcpStream) {
     let _ = stream.write_all(response.as_bytes());
 }
 
+fn handle_strict_official_registry_request(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                request_bytes.extend_from_slice(&buffer[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if !request_bytes.is_empty() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let request = String::from_utf8_lossy(&request_bytes);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    let (status, body) = if path.starts_with("/official/servers?limit=200") {
+        (
+            "422 Unprocessable Entity",
+            r#"{"title":"Unprocessable Entity","status":422,"detail":"validation failed","errors":[{"message":"expected number <= 100","location":"query.limit","value":200}]}"#,
+        )
+    } else if path.starts_with("/official/servers?limit=100") {
+        (
+            "200 OK",
+            r#"{
+  "servers": [
+    {
+      "server": {
+        "name": "memory",
+        "title": "Memory",
+        "description": "Shared memory server",
+        "repository": { "url": "https://github.com/modelcontextprotocol/servers" },
+        "packages": [
+          {
+            "registryType": "npm",
+            "identifier": "@modelcontextprotocol/server-memory",
+            "version": "1.0.0"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": { "nextCursor": null }
+}"#,
+        )
+    } else {
+        ("404 Not Found", r#"{"error":"not-found"}"#)
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
 #[test]
 fn test_mcpsmith_root_help_lists_agentic_pipeline() {
     let ctx = TestContext::new();
@@ -229,6 +350,7 @@ fn test_mcpsmith_root_help_lists_agentic_pipeline() {
         .success()
         .stdout(predicate::str::contains("One-shot conversion:"))
         .stdout(predicate::str::contains("mcpsmith run <server>"))
+        .stdout(predicate::str::contains("mcpsmith discover"))
         .stdout(predicate::str::contains("mcpsmith resolve <server>"))
         .stdout(predicate::str::contains("mcpsmith verify <server>"))
         .stdout(predicate::str::contains(
@@ -240,9 +362,72 @@ fn test_mcpsmith_root_help_lists_agentic_pipeline() {
         .stdout(predicate::str::contains(
             "Every command is non-interactive.",
         ))
-        .stdout(predicate::str::contains("\n  discover").not())
         .stdout(predicate::str::contains("\n  apply").not())
         .stdout(predicate::str::contains("contract-test").not());
+}
+
+#[test]
+fn test_mcpsmith_discover_help_explains_local_inventory() {
+    let ctx = TestContext::new();
+
+    ctx.cmd()
+        .args(["discover", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Discover installed MCP servers from local config files.",
+        ))
+        .stdout(predicate::str::contains(
+            "Searches the standard local MCP config locations plus any --config paths you provide.",
+        ))
+        .stdout(predicate::str::contains(
+            "Use this before resolve or run when you want to see exactly which MCP entries mcpsmith can inspect.",
+        ))
+        .stdout(predicate::str::contains("--config <PATH>"));
+}
+
+#[test]
+fn test_mcpsmith_discover_lists_local_servers() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+
+    let mut servers = Map::new();
+    let mut local = Map::new();
+    local.insert(
+        "command".to_string(),
+        Value::String(mock_mcp.to_string_lossy().into_owned()),
+    );
+    local.insert(
+        "description".to_string(),
+        Value::String("Read-only browser helpers".to_string()),
+    );
+    local.insert("readOnly".to_string(), Value::Bool(true));
+    servers.insert("playwright".to_string(), Value::Object(local));
+
+    let mut remote = Map::new();
+    remote.insert(
+        "url".to_string(),
+        Value::String("https://example.com/mcp".to_string()),
+    );
+    servers.insert("remote-demo".to_string(), Value::Object(remote));
+
+    ctx.write_mcp_servers(servers);
+
+    ctx.cmd()
+        .args(["discover", "--config"])
+        .arg(&config_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Discovered 2 MCP servers."))
+        .stdout(predicate::str::contains("custom-1:playwright"))
+        .stdout(predicate::str::contains("custom-1:remote-demo"))
+        .stdout(predicate::str::contains("Read-only browser helpers"))
+        .stdout(predicate::str::contains(
+            config_path.to_string_lossy().to_string(),
+        ))
+        .stdout(predicate::str::contains("https://example.com/mcp"));
 }
 
 #[test]
@@ -308,7 +493,7 @@ fn test_mcpsmith_catalog_sync_help_lists_default_providers() {
 fn test_mcpsmith_rejects_legacy_subcommands() {
     let ctx = TestContext::new();
 
-    for legacy in ["discover", "build", "contract-test", "apply"] {
+    for legacy in ["build", "contract-test", "apply"] {
         ctx.cmd()
             .args(["help", legacy])
             .assert()
@@ -769,6 +954,21 @@ fn test_mcpsmith_catalog_sync_and_stats_use_machine_readable_endpoints() {
     );
     assert_eq!(stats["result"]["unique_servers"].as_u64().unwrap(), 2);
     assert_eq!(stats["result"]["source_resolvable"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_respects_official_registry_limit_cap() {
+    let ctx = TestContext::new();
+    let registry = StrictOfficialLimitRegistryServer::start();
+
+    ctx.cmd()
+        .env(
+            "MCPSMITH_OFFICIAL_REGISTRY_BASE_URL",
+            format!("{}/official", registry.base_url),
+        )
+        .args(["catalog", "sync", "--json", "--provider", "official"])
+        .assert()
+        .success();
 }
 
 #[test]

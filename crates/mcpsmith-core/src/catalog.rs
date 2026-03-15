@@ -238,7 +238,7 @@ fn fetch_official_records(
     let mut records = Vec::new();
 
     loop {
-        let mut url = format!("{}/servers?limit=200", official_registry_base());
+        let mut url = format!("{}/servers?limit=100", official_registry_base());
         if let Some(cursor) = cursor.as_deref() {
             url.push_str("&cursor=");
             url.push_str(&url_encode_path_segment(cursor));

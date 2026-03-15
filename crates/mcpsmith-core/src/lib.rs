@@ -30,6 +30,7 @@ pub use pipeline::{
     verify_conversion_bundle,
 };
 pub use skillset::build_from_bundle;
+pub use source::discover_inventory;
 
 const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 240;
 const DEFAULT_BACKEND_CHUNK_SIZE: usize = 4;

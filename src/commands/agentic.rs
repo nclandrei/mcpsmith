@@ -2,7 +2,7 @@ use crate::config::{Config as AppConfig, ConvertBackendPreference as AppBackendP
 use anyhow::{Context, Result, bail};
 use mcpsmith_core::{
     CatalogProvider, CatalogSyncOptions, RunOptions, ServerConversionBundle, SnippetEvidence,
-    VerifyReport, catalog_stats, catalog_sync, load_cached_catalog_sync_result,
+    VerifyReport, catalog_stats, catalog_sync, discover_inventory, load_cached_catalog_sync_result,
     load_catalog_sync_result, materialize_snapshot, resolve_artifact, review_conversion_bundle,
     run_pipeline, synthesize_from_evidence, verify_conversion_bundle,
 };
@@ -212,6 +212,44 @@ pub fn run_catalog_stats_cmd(json: bool, from: Option<&Path>) -> Result<()> {
         println!("Source resolvable: {}", stats.source_resolvable);
         println!("Remote only: {}", stats.remote_only);
         println!("Unresolved: {}", stats.unresolved);
+    })
+}
+
+pub fn run_discover_cmd(json: bool, config_paths: &[PathBuf]) -> Result<()> {
+    let result = discover_inventory(config_paths)?;
+    let path = stage_output_path("discover", "all");
+    write_json(&path, &result)?;
+    print_json_or_human(json, &path, &result, || {
+        if result.servers.is_empty() {
+            println!("No MCP servers discovered.");
+            println!("Searched config paths:");
+            for searched in &result.searched_paths {
+                println!("- {}", searched.display());
+            }
+            return;
+        }
+
+        let noun = if result.servers.len() == 1 {
+            "server"
+        } else {
+            "servers"
+        };
+        println!("Discovered {} MCP {noun}.", result.servers.len());
+        for server in &result.servers {
+            let launch = server
+                .command
+                .as_deref()
+                .or(server.url.as_deref())
+                .unwrap_or("unknown");
+            println!("- {} ({})", server.id, server.name);
+            println!("  config: {}", server.source_path.display());
+            println!("  launch: {launch}");
+            println!(
+                "  permission={} recommendation={} tools={}",
+                server.inferred_permission, server.recommendation, server.declared_tool_count
+            );
+            println!("  purpose: {}", server.purpose);
+        }
     })
 }
 
@@ -495,6 +533,7 @@ pub fn run_overview(json: bool) -> Result<()> {
             serde_json::to_string_pretty(&Overview {
                 one_shot: &["mcpsmith <server>", "mcpsmith run <server>",],
                 workflow: &[
+                    "mcpsmith discover",
                     "mcpsmith catalog sync",
                     "mcpsmith resolve <server>",
                     "mcpsmith snapshot <server>",
@@ -518,7 +557,8 @@ pub fn run_overview(json: bool) -> Result<()> {
     println!("One-shot:");
     println!("  mcpsmith <server>");
     println!("  mcpsmith run <server>");
-    println!("Inspectable staged flow:");
+    println!("Inspection and staged flow:");
+    println!("  mcpsmith discover");
     println!("  mcpsmith catalog sync");
     println!("  mcpsmith resolve <server>");
     println!("  mcpsmith snapshot <server>");
