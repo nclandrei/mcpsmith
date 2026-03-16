@@ -870,7 +870,7 @@ pub fn synthesize_from_evidence(
     let mut tool_conversions = Vec::with_capacity(enriched_evidence.tool_evidence.len());
     let mut blocked = false;
     let mut block_reasons = Vec::new();
-    let mut selected_backend = backend_ctx.selection.selected;
+    let selected_backend = backend_ctx.selection.selected;
     let mut fallback_used = false;
 
     for pack in &enriched_evidence.tool_evidence {
@@ -886,14 +886,13 @@ pub fn synthesize_from_evidence(
                     && let Some(fallback) = backend_ctx.selection.fallback
                 {
                     fallback_used = true;
-                    selected_backend = fallback;
                     diagnostics.push(format!(
                         "Synthesis failed on '{}', retrying '{}' for tool '{}': {}",
-                        backend_ctx.selection.selected, fallback, pack.tool_name, err
+                        selected_backend, fallback, pack.tool_name, err
                     ));
                     match synthesize_tool_conversion_with_backend(
                         fallback,
-                        &evidence.server,
+                        &enriched_evidence.server,
                         pack,
                         options.backend_config.timeout_seconds,
                     ) {
@@ -2702,6 +2701,20 @@ mod tests {
     use super::*;
     use crate::{ConversionRecommendation, PermissionLevel, SourceGrounding};
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, OnceLock};
+
+    fn backend_command_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_executable_script(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     fn sample_server(root: &Path) -> MCPServerProfile {
         MCPServerProfile {
@@ -2747,6 +2760,60 @@ mod tests {
                     .map(|input| ((*input).to_string(), json!({ "type": "string" })))
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             })),
+        }
+    }
+
+    fn sample_evidence_bundle(root: &Path, runtime_tools: Vec<RuntimeTool>) -> EvidenceBundle {
+        let server = sample_server(root);
+        let artifact = ResolvedArtifact {
+            generated_at: Utc::now(),
+            server: server.clone(),
+            kind: ArtifactKind::NpmPackage,
+            identity: ArtifactIdentity {
+                value: "@acme/demo".to_string(),
+                version: Some("1.0.0".to_string()),
+                source_url: Some("https://github.com/acme/demo".to_string()),
+            },
+            source_root_hint: None,
+            blocked: false,
+            block_reason: None,
+            diagnostics: vec![],
+        };
+        let snapshot = SourceSnapshot {
+            generated_at: Utc::now(),
+            artifact: artifact.clone(),
+            cache_root: root.join("cache"),
+            source_root: root.to_path_buf(),
+            reused_cache: false,
+            manifest_paths: vec![],
+            diagnostics: vec![],
+        };
+        let tool_evidence = runtime_tools
+            .iter()
+            .cloned()
+            .map(|runtime_tool| ToolEvidencePack {
+                tool_name: runtime_tool.name.clone(),
+                required_inputs: required_inputs_from_runtime_tool(&runtime_tool),
+                runtime_tool,
+                registration: None,
+                handler: None,
+                supporting_snippets: vec![],
+                test_snippets: vec![],
+                doc_snippets: vec![],
+                mapper_fallback: None,
+                diagnostics: vec![],
+                confidence: 0.95,
+            })
+            .collect::<Vec<_>>();
+
+        EvidenceBundle {
+            generated_at: Utc::now(),
+            server,
+            artifact,
+            snapshot,
+            runtime_tools,
+            tool_evidence,
+            diagnostics: vec![],
         }
     }
 
@@ -3392,5 +3459,106 @@ const clickSummary = "click click click";"#,
                 .map(|snippet| snippet.file_path.clone()),
             Some(PathBuf::from("build/src/tools/screenshot.js"))
         );
+    }
+
+    #[test]
+    fn synthesize_from_evidence_retries_primary_backend_for_each_tool() {
+        let _guard = backend_command_env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let codex_script = dir.path().join("fake-codex.sh");
+        let claude_script = dir.path().join("fake-claude.sh");
+
+        write_executable_script(
+            &codex_script,
+            r#"#!/bin/sh
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "version" ]; then
+  exit 0
+fi
+
+output_path=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message)
+      shift
+      output_path="$1"
+      ;;
+  esac
+  shift
+done
+
+prompt="$(cat)"
+
+case "$prompt" in
+  *'"tool_name": "click"'*)
+    echo "codex could not synthesize click" >&2
+    exit 1
+    ;;
+  *'"tool_name": "close_page"'*)
+    cat <<'EOF' > "$output_path"
+{"semantic_summary":{"what_it_does":"Closes a page.","required_inputs":[],"prerequisites":[],"side_effect_level":"write","success_signals":["Page closed"],"failure_modes":["Page missing"],"citations":["src/close_page.ts"],"confidence":0.8},"workflow_skill":{"id":"close_page","title":"Close page","goal":"Close a page.","when_to_use":"Use when you need to close a page.","trigger_phrases":[],"origin_tools":["close_page"],"stop_and_ask":[],"native_steps":[{"title":"Close","command":"echo close"}],"verification":["Verify the page closes."],"return_contract":["Return the close result."],"confidence":0.8}}
+EOF
+    exit 0
+    ;;
+  *)
+    echo "unexpected prompt" >&2
+    exit 2
+    ;;
+esac
+"#,
+        );
+        write_executable_script(
+            &claude_script,
+            r#"#!/bin/sh
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "version" ]; then
+  exit 0
+fi
+
+prompt="$(cat)"
+
+case "$prompt" in
+  *'"tool_name": "click"'*)
+    printf '%s\n' '{"output":"{\"semantic_summary\":{\"what_it_does\":\"Clicks an element.\",\"required_inputs\":[\"uid\"],\"prerequisites\":[],\"side_effect_level\":\"write\",\"success_signals\":[\"Click dispatched\"],\"failure_modes\":[\"Element missing\"],\"citations\":[\"src/click.ts\"],\"confidence\":0.8},\"workflow_skill\":{\"id\":\"click\",\"title\":\"Click\",\"goal\":\"Click an element.\",\"when_to_use\":\"Use when you need to click an element.\",\"trigger_phrases\":[],\"origin_tools\":[\"click\"],\"stop_and_ask\":[],\"native_steps\":[{\"title\":\"Click\",\"command\":\"echo click\"}],\"verification\":[\"Verify the click happens.\"],\"return_contract\":[\"Return the click result.\"],\"confidence\":0.8}}"}'
+    exit 0
+    ;;
+  *)
+    echo "claude should not handle this tool" >&2
+    exit 1
+    ;;
+esac
+"#,
+        );
+
+        unsafe {
+            std::env::set_var("MCPSMITH_CODEX_COMMAND", &codex_script);
+            std::env::set_var("MCPSMITH_CLAUDE_COMMAND", &claude_script);
+        }
+
+        let evidence = sample_evidence_bundle(
+            dir.path(),
+            vec![
+                runtime_tool("click", &["uid"]),
+                runtime_tool("close_page", &[]),
+            ],
+        );
+        let options = RunOptions {
+            backend_auto: true,
+            ..RunOptions::default()
+        };
+
+        let synthesis = synthesize_from_evidence(&evidence, &options).unwrap();
+
+        assert!(
+            !synthesis.bundle.blocked,
+            "expected synthesis to recover after one fallback, got {:?}",
+            synthesis.bundle.block_reasons
+        );
+        assert_eq!(synthesis.bundle.backend_used, "codex");
+        assert!(synthesis.bundle.backend_fallback_used);
+        assert_eq!(synthesis.bundle.tool_conversions.len(), 2);
+
+        unsafe {
+            std::env::remove_var("MCPSMITH_CODEX_COMMAND");
+            std::env::remove_var("MCPSMITH_CLAUDE_COMMAND");
+        }
     }
 }

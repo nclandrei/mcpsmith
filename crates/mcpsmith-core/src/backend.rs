@@ -932,6 +932,7 @@ fn invoke_codex_structured_with_timeout(
         codex
             .args([
                 "exec",
+                "--skip-git-repo-check",
                 "--ephemeral",
                 "-c",
                 &codex_reasoning_option(reasoning_effort),
@@ -1324,6 +1325,8 @@ fn extract_embedded_json(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, OnceLock};
 
     fn backend_env_lock() -> &'static Mutex<()> {
@@ -1428,5 +1431,57 @@ mod tests {
         unsafe {
             std::env::remove_var("MCPSMITH_CODEX_HOME");
         }
+    }
+
+    #[test]
+    fn codex_structured_invocation_skips_git_repo_trust_check() {
+        let dir = tempfile::tempdir().expect("backend tempdir");
+        let script_path = dir.path().join("fake-codex.sh");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "version" ]; then
+  exit 0
+fi
+
+skip_git_check=0
+output_path=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --skip-git-repo-check)
+      skip_git_check=1
+      ;;
+    --output-last-message)
+      shift
+      output_path="$1"
+      ;;
+  esac
+  shift
+done
+
+if [ "$skip_git_check" -ne 1 ]; then
+  echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2
+  exit 1
+fi
+
+printf '%s' '{"ok":true}' > "$output_path"
+"#,
+        )
+        .expect("write fake codex");
+        #[cfg(unix)]
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake codex");
+
+        let result = invoke_codex_structured_with_timeout(
+            script_path.to_string_lossy().as_ref(),
+            "ignored prompt",
+            r#"{"type":"object"}"#,
+            5,
+            CODEX_REASONING_EFFORT_LOW,
+        )
+        .expect("codex invocation should succeed");
+
+        assert_eq!(result, r#"{"ok":true}"#);
     }
 }
