@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 use support::{
     TestContext, count_backups, write_local_source_layout, write_mock_claude_script,
-    write_mock_codex_script, write_mock_codex_script_with_review_fix, write_mock_mcp_script,
+    write_mock_codex_script, write_mock_codex_script_with_delay,
+    write_mock_codex_script_with_review_fix, write_mock_mcp_script,
 };
 
 fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<bool>) {
@@ -470,6 +471,38 @@ fn test_mcpsmith_run_help_explains_install_and_dry_run() {
             "Use --skills-dir to write into an isolated preview directory.",
         ))
         .stdout(predicate::str::contains("Examples:"));
+}
+
+#[test]
+fn test_mcpsmith_run_human_output_streams_stage_progress_updates() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex-slow.py");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script_with_delay(&mock_codex, 250);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .env("MCPSMITH_PROGRESS_INTERVAL_MS", "50")
+        .args([
+            "run",
+            "playwright",
+            "--dry-run",
+            "--backend",
+            "codex",
+            "--config",
+        ])
+        .arg(&config_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Progress: resolve"))
+        .stderr(predicate::str::contains("Progress: synthesize"))
+        .stderr(predicate::str::contains("still running"))
+        .stdout(predicate::str::contains("Run status: dry-run"));
 }
 
 #[test]

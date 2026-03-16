@@ -198,6 +198,10 @@ pub fn write_mock_codex_script(path: &Path) {
     write_mock_backend_script(path, "mock-codex");
 }
 
+pub fn write_mock_codex_script_with_delay(path: &Path, delay_ms: u64) {
+    write_mock_backend_script_with_delay(path, "mock-codex", delay_ms);
+}
+
 pub fn write_mock_claude_script(path: &Path) {
     write_mock_backend_script(path, "mock-claude");
 }
@@ -207,18 +211,33 @@ pub fn write_mock_codex_script_with_review_fix(path: &Path) {
 }
 
 fn write_mock_backend_script(path: &Path, version_label: &str) {
-    write_mock_backend_script_with_mode(path, version_label, false);
+    write_mock_backend_script_with_settings(path, version_label, false, 0);
+}
+
+fn write_mock_backend_script_with_delay(path: &Path, version_label: &str, delay_ms: u64) {
+    write_mock_backend_script_with_settings(path, version_label, false, delay_ms);
 }
 
 fn write_mock_backend_script_with_mode(path: &Path, version_label: &str, revise_review: bool) {
+    write_mock_backend_script_with_settings(path, version_label, revise_review, 0);
+}
+
+fn write_mock_backend_script_with_settings(
+    path: &Path,
+    version_label: &str,
+    revise_review: bool,
+    delay_ms: u64,
+) {
     let body = r#"#!/usr/bin/env python3
 import json
 import os
 import re
 import sys
+import time
 
 VERSION = __VERSION__
 REVISE_REVIEW = __REVISE__
+DELAY_SECONDS = __DELAY_SECONDS__
 
 def tool_name(prompt: str) -> str:
     match = re.search(r'"tool_name"\s*:\s*"([^"]+)"', prompt)
@@ -326,6 +345,9 @@ prompt = sys.stdin.read()
 name = tool_name(prompt)
 capture_path = os.environ.get("MCPSMITH_BACKEND_CAPTURE_PATH")
 
+if DELAY_SECONDS > 0:
+    time.sleep(DELAY_SECONDS)
+
 if "reviewing a generated skill draft" in prompt:
     needs_fix = REVISE_REVIEW and "TODO_REVIEW_FIX" in prompt
     if needs_fix:
@@ -358,7 +380,8 @@ else:
     print(json.dumps({"output": body}))
 "#
     .replace("__VERSION__", &format!("{version_label:?}"))
-    .replace("__REVISE__", if revise_review { "True" } else { "False" });
+    .replace("__REVISE__", if revise_review { "True" } else { "False" })
+    .replace("__DELAY_SECONDS__", &format!("{:.3}", delay_ms as f64 / 1000.0));
     write_agent_script(path, &body);
 }
 

@@ -4,13 +4,14 @@ use mcpsmith_core::{
     CatalogProvider, CatalogSyncOptions, RunOptions, ServerConversionBundle, SnippetEvidence,
     VerifyReport, catalog_stats, catalog_sync, discover_inventory, load_cached_catalog_sync_result,
     load_catalog_sync_result, materialize_snapshot, resolve_artifact, review_conversion_bundle,
-    run_pipeline, synthesize_from_evidence, verify_conversion_bundle,
+    run_pipeline, run_pipeline_with_progress, synthesize_from_evidence, verify_conversion_bundle,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 fn map_backend_preference(pref: &AppBackendPreference) -> mcpsmith_core::ConvertBackendPreference {
     match pref {
@@ -116,6 +117,14 @@ fn load_json_payload<T: DeserializeOwned>(path: &Path) -> Result<T> {
 
 fn load_cached_catalog() -> Option<mcpsmith_core::CatalogSyncResult> {
     load_cached_catalog_sync_result(None).ok()
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
+    }
 }
 
 fn confidence_label(confidence: f32) -> &'static str {
@@ -485,7 +494,42 @@ pub fn run_run_cmd(
 ) -> Result<()> {
     let options = run_options(backend, backend_auto, skills_dir, dry_run, app_config)?;
     let catalog = load_cached_catalog();
-    let result = run_pipeline(server, config_paths, &options, catalog.as_ref())?;
+    let result = if json {
+        run_pipeline(server, config_paths, &options, catalog.as_ref())?
+    } else {
+        run_pipeline_with_progress(server, config_paths, &options, catalog.as_ref(), |update| {
+            match update.kind {
+                mcpsmith_core::PipelineProgressEventKind::Started => eprintln!(
+                    "Progress: {} ({}/{}) started",
+                    update.stage, update.step, update.total_steps
+                ),
+                mcpsmith_core::PipelineProgressEventKind::Heartbeat => eprintln!(
+                    "Progress: {} ({}/{}) still running after {}",
+                    update.stage,
+                    update.step,
+                    update.total_steps,
+                    format_elapsed(update.elapsed)
+                ),
+                mcpsmith_core::PipelineProgressEventKind::Finished => match update.outcome {
+                    Some(mcpsmith_core::PipelineProgressOutcome::Succeeded) => eprintln!(
+                        "Progress: {} ({}/{}) done in {}",
+                        update.stage,
+                        update.step,
+                        update.total_steps,
+                        format_elapsed(update.elapsed)
+                    ),
+                    Some(mcpsmith_core::PipelineProgressOutcome::Failed) => eprintln!(
+                        "Progress: {} ({}/{}) failed after {}",
+                        update.stage,
+                        update.step,
+                        update.total_steps,
+                        format_elapsed(update.elapsed)
+                    ),
+                    None => {}
+                },
+            }
+        })?
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {

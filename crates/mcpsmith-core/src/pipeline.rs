@@ -21,6 +21,12 @@ use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
+use std::time::{Duration, Instant};
 use tar::Archive;
 use walkdir::{DirEntry, WalkDir};
 use zip::ZipArchive;
@@ -290,8 +296,151 @@ pub struct RunReport {
     pub next_action: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineRunStage {
+    Resolve,
+    Snapshot,
+    Evidence,
+    Synthesize,
+    Review,
+    Verify,
+    WriteSkills,
+    UpdateConfig,
+}
+
+impl std::fmt::Display for PipelineRunStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineRunStage::Resolve => write!(f, "resolve"),
+            PipelineRunStage::Snapshot => write!(f, "snapshot"),
+            PipelineRunStage::Evidence => write!(f, "evidence"),
+            PipelineRunStage::Synthesize => write!(f, "synthesize"),
+            PipelineRunStage::Review => write!(f, "review"),
+            PipelineRunStage::Verify => write!(f, "verify"),
+            PipelineRunStage::WriteSkills => write!(f, "write-skills"),
+            PipelineRunStage::UpdateConfig => write!(f, "update-config"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineProgressEventKind {
+    Started,
+    Heartbeat,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineProgressOutcome {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineProgressUpdate {
+    pub stage: PipelineRunStage,
+    pub kind: PipelineProgressEventKind,
+    pub outcome: Option<PipelineProgressOutcome>,
+    pub step: usize,
+    pub total_steps: usize,
+    pub elapsed: Duration,
+}
+
+type PipelineProgressCallback = Arc<dyn Fn(PipelineProgressUpdate) + Send + Sync + 'static>;
+
 fn default_backend_auto() -> bool {
     true
+}
+
+fn pipeline_progress_interval() -> Duration {
+    std::env::var("MCPSMITH_PROGRESS_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(5))
+}
+
+fn emit_pipeline_progress(
+    callback: Option<&PipelineProgressCallback>,
+    update: PipelineProgressUpdate,
+) {
+    if let Some(callback) = callback {
+        callback(update);
+    }
+}
+
+fn run_pipeline_stage<T, F>(
+    callback: Option<&PipelineProgressCallback>,
+    stage: PipelineRunStage,
+    step: usize,
+    total_steps: usize,
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let started_at = Instant::now();
+    emit_pipeline_progress(
+        callback,
+        PipelineProgressUpdate {
+            stage,
+            kind: PipelineProgressEventKind::Started,
+            outcome: None,
+            step,
+            total_steps,
+            elapsed: Duration::from_secs(0),
+        },
+    );
+
+    let heartbeat = callback.map(|callback| {
+        let callback = Arc::clone(callback);
+        let interval = pipeline_progress_interval();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                thread::sleep(interval);
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                callback(PipelineProgressUpdate {
+                    stage,
+                    kind: PipelineProgressEventKind::Heartbeat,
+                    outcome: None,
+                    step,
+                    total_steps,
+                    elapsed: started_at.elapsed(),
+                });
+            }
+        });
+        (stop, handle)
+    });
+
+    let result = operation();
+
+    if let Some((stop, handle)) = heartbeat {
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+    }
+
+    emit_pipeline_progress(
+        callback,
+        PipelineProgressUpdate {
+            stage,
+            kind: PipelineProgressEventKind::Finished,
+            outcome: Some(if result.is_ok() {
+                PipelineProgressOutcome::Succeeded
+            } else {
+                PipelineProgressOutcome::Failed
+            }),
+            step,
+            total_steps,
+            elapsed: started_at.elapsed(),
+        },
+    );
+
+    result
 }
 
 fn inspect_installed_server(
@@ -898,6 +1047,35 @@ pub fn run_pipeline(
     options: &RunOptions,
     catalog: Option<&CatalogSyncResult>,
 ) -> Result<RunReport> {
+    run_pipeline_inner(server_selector, additional_paths, options, catalog, None)
+}
+
+pub fn run_pipeline_with_progress<F>(
+    server_selector: &str,
+    additional_paths: &[PathBuf],
+    options: &RunOptions,
+    catalog: Option<&CatalogSyncResult>,
+    progress: F,
+) -> Result<RunReport>
+where
+    F: Fn(PipelineProgressUpdate) + Send + Sync + 'static,
+{
+    run_pipeline_inner(
+        server_selector,
+        additional_paths,
+        options,
+        catalog,
+        Some(Arc::new(progress)),
+    )
+}
+
+fn run_pipeline_inner(
+    server_selector: &str,
+    additional_paths: &[PathBuf],
+    options: &RunOptions,
+    catalog: Option<&CatalogSyncResult>,
+    progress: Option<PipelineProgressCallback>,
+) -> Result<RunReport> {
     let run_root = create_run_root(server_selector)?;
     let artifacts = RunArtifacts {
         resolve: run_root.join("resolve.json"),
@@ -908,19 +1086,48 @@ pub fn run_pipeline(
         verify: run_root.join("verify.json"),
     };
 
-    let resolved = resolve_artifact(server_selector, additional_paths, catalog)?;
-    write_json_artifact(&artifacts.resolve, &resolved)?;
-    let snapshot = materialize_snapshot(&resolved, None)?;
-    write_json_artifact(&artifacts.snapshot, &snapshot)?;
-    let evidence = build_evidence_bundle(&resolved, &snapshot.snapshot, None)?;
-    write_json_artifact(&artifacts.evidence, &evidence)?;
-    let synthesis = synthesize_from_evidence(&evidence, options)?;
-    write_json_artifact(&artifacts.evidence, &synthesis.bundle.evidence)?;
-    write_json_artifact(&artifacts.synthesis, &synthesis)?;
-    let review = review_conversion_bundle(&synthesis.bundle, options)?;
-    write_json_artifact(&artifacts.review, &review)?;
-    let verify = verify_conversion_bundle(&review.bundle);
-    write_json_artifact(&artifacts.verify, &verify)?;
+    let total_steps = if options.dry_run { 7 } else { 8 };
+    let progress = progress.as_ref();
+
+    let resolved = run_pipeline_stage(progress, PipelineRunStage::Resolve, 1, total_steps, || {
+        let resolved = resolve_artifact(server_selector, additional_paths, catalog)?;
+        write_json_artifact(&artifacts.resolve, &resolved)?;
+        Ok(resolved)
+    })?;
+    let snapshot =
+        run_pipeline_stage(progress, PipelineRunStage::Snapshot, 2, total_steps, || {
+            let snapshot = materialize_snapshot(&resolved, None)?;
+            write_json_artifact(&artifacts.snapshot, &snapshot)?;
+            Ok(snapshot)
+        })?;
+    let evidence =
+        run_pipeline_stage(progress, PipelineRunStage::Evidence, 3, total_steps, || {
+            let evidence = build_evidence_bundle(&resolved, &snapshot.snapshot, None)?;
+            write_json_artifact(&artifacts.evidence, &evidence)?;
+            Ok(evidence)
+        })?;
+    let synthesis = run_pipeline_stage(
+        progress,
+        PipelineRunStage::Synthesize,
+        4,
+        total_steps,
+        || {
+            let synthesis = synthesize_from_evidence(&evidence, options)?;
+            write_json_artifact(&artifacts.evidence, &synthesis.bundle.evidence)?;
+            write_json_artifact(&artifacts.synthesis, &synthesis)?;
+            Ok(synthesis)
+        },
+    )?;
+    let review = run_pipeline_stage(progress, PipelineRunStage::Review, 5, total_steps, || {
+        let review = review_conversion_bundle(&synthesis.bundle, options)?;
+        write_json_artifact(&artifacts.review, &review)?;
+        Ok(review)
+    })?;
+    let verify = run_pipeline_stage(progress, PipelineRunStage::Verify, 6, total_steps, || {
+        let verify = verify_conversion_bundle(&review.bundle);
+        write_json_artifact(&artifacts.verify, &verify)?;
+        Ok(verify)
+    })?;
 
     if !verify.passed {
         return Ok(RunReport {
@@ -947,11 +1154,20 @@ pub fn run_pipeline(
             .clone()
             .unwrap_or_else(default_agents_skills_dir)
     };
-    let build = build_from_bundle(&review.bundle, Some(skills_dir.clone()))?;
-    let built = build
-        .servers
-        .first()
-        .context("Build result did not contain a generated server entry")?;
+    let built = run_pipeline_stage(
+        progress,
+        PipelineRunStage::WriteSkills,
+        7,
+        total_steps,
+        || {
+            let build = build_from_bundle(&review.bundle, Some(skills_dir.clone()))?;
+            build
+                .servers
+                .first()
+                .cloned()
+                .context("Build result did not contain a generated server entry")
+        },
+    )?;
     let orchestrator = built.orchestrator_skill_path.clone();
     let tool_paths = built.tool_skill_paths.clone();
     let mut diagnostics = built.notes.clone();
@@ -959,30 +1175,39 @@ pub fn run_pipeline(
     let mut config_updated = false;
 
     if !options.dry_run {
-        match remove_server_from_config(
-            &review.bundle.evidence.server.source_path,
-            &review.bundle.evidence.server.name,
-        ) {
-            Ok((backup, true)) => {
+        let (backup, updated) = run_pipeline_stage(
+            progress,
+            PipelineRunStage::UpdateConfig,
+            8,
+            total_steps,
+            || match remove_server_from_config(
+                &review.bundle.evidence.server.source_path,
+                &review.bundle.evidence.server.name,
+            ) {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    rollback_server_skill_files(&orchestrator, &tool_paths);
+                    Err(err).with_context(|| {
+                        format!(
+                            "Failed to mutate MCP config for '{}'; generated skill files were rolled back.",
+                            review.bundle.evidence.server.id
+                        )
+                    })
+                }
+            },
+        )?;
+        match (backup, updated) {
+            (backup, true) => {
                 config_backup = backup;
                 config_updated = true;
             }
-            Ok((_backup, false)) => {
+            (_backup, false) => {
                 rollback_server_skill_files(&orchestrator, &tool_paths);
                 bail!(
                     "MCP config entry '{}' not found in {}. Rolled back generated skills to keep conversion atomic.",
                     review.bundle.evidence.server.name,
                     review.bundle.evidence.server.source_path.display()
                 );
-            }
-            Err(err) => {
-                rollback_server_skill_files(&orchestrator, &tool_paths);
-                return Err(err).with_context(|| {
-                    format!(
-                        "Failed to mutate MCP config for '{}'; generated skill files were rolled back.",
-                        review.bundle.evidence.server.id
-                    )
-                });
             }
         }
         diagnostics.push(format!(

@@ -22,12 +22,13 @@ pub use catalog::{
 };
 pub use pipeline::{
     ArtifactIdentity, ArtifactKind, EvidenceBundle, HelperScript, MapperFallbackEvidence,
-    MapperRelevantFile, MapperRelevantFileRole, ResolvedArtifact, ReviewFinding, ReviewReport,
+    MapperRelevantFile, MapperRelevantFileRole, PipelineProgressEventKind, PipelineProgressOutcome,
+    PipelineProgressUpdate, PipelineRunStage, ResolvedArtifact, ReviewFinding, ReviewReport,
     RunArtifacts, RunOptions, RunReport, ServerConversionBundle, SnapshotMaterialization,
     SnippetEvidence, SourceSnapshot, SynthesisReport, ToolConversionDraft, ToolEvidencePack,
     ToolSemanticSummary, VerifyIssue, VerifyReport, build_evidence_bundle, materialize_snapshot,
-    resolve_artifact, review_conversion_bundle, run_pipeline, synthesize_from_evidence,
-    verify_conversion_bundle,
+    resolve_artifact, review_conversion_bundle, run_pipeline, run_pipeline_with_progress,
+    synthesize_from_evidence, verify_conversion_bundle,
 };
 pub use skillset::build_from_bundle;
 pub use source::discover_inventory;
