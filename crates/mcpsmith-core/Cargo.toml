@@ -1,6 +1,6 @@
 [package]
 name = "mcpsmith-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Core staged pipeline for resolving, grounding, reviewing, and installing mcpsmith conversions"
 license = "MIT"
