@@ -23,7 +23,7 @@ brew install nclandrei/tap/mcpsmith
 cargo install mcpsmith
 ```
 
-The Homebrew formula installs from the published `mcpsmith` crate on crates.io. That keeps installation working even though release automation renders the formula from the crate tarball rather than the GitHub source checkout.
+The Homebrew formula builds from the tagged GitHub source archive now that the repository is public. `cargo install mcpsmith` remains the direct crates.io path.
 
 ## Quick start
 
@@ -232,7 +232,7 @@ When the version in `Cargo.toml` has not been published yet, the workflow will:
 - Build release artifacts
 - Publish a GitHub release
 - Publish `mcpsmith-core` and `mcpsmith` to crates.io
-- Update `nclandrei/homebrew-tap` from the published `mcpsmith-<version>.crate` tarball
+- Update `nclandrei/homebrew-tap` from the tagged GitHub source archive
 
 The workflow creates the `v<version>` tag automatically. Do not push release tags manually.
 

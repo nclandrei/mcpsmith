@@ -9,7 +9,7 @@
 - For CLI/help/output changes, verify in Ghostty with [$cli-verify](/Users/anicolae/code/dotfiles/config/skills/cli-verify/SKILL.md) and keep session state under `.codex-runtime/`.
 - Default catalog scope: official, smithery
 - Low-confidence mapper fallback: enabled only when deterministic evidence is weak
-- Homebrew tap: `nclandrei/homebrew-tap` (formula installs from the published crates.io source package)
+- Homebrew tap: `nclandrei/homebrew-tap` (formula builds from the tagged GitHub source archive)
 - Release workflow: `.github/workflows/release.yml`
 
 ## Core commands

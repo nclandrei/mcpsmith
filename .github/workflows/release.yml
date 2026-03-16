@@ -252,18 +252,18 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Render Homebrew formula from crates.io package
+      - name: Render Homebrew formula from GitHub source archive
         run: |
           set -euo pipefail
           version="${{ needs.prepare-release.outputs.release_version }}"
-          crate_url="https://static.crates.io/crates/mcpsmith/mcpsmith-${version}.crate"
+          archive_url="https://github.com/${{ github.repository }}/archive/refs/tags/v${version}.tar.gz"
 
-          curl -fsSL "$crate_url" -o /tmp/mcpsmith.crate
-          crate_sha="$(sha256sum /tmp/mcpsmith.crate | awk '{print $1}')"
+          curl -fsSL "$archive_url" -o /tmp/mcpsmith.tar.gz
+          archive_sha="$(sha256sum /tmp/mcpsmith.tar.gz | awk '{print $1}')"
 
           ./scripts/release/render-homebrew-formula.sh \
             "$version" \
-            "$crate_sha" \
+            "$archive_sha" \
             homebrew-tap/Formula/mcpsmith.rb
 
       - name: Commit and push formula

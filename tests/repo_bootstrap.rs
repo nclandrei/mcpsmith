@@ -76,7 +76,7 @@ fn llms_summary_documents_agent_entrypoints() {
         "Default catalog scope: official, smithery",
         "Low-confidence mapper fallback: enabled only when deterministic evidence is weak",
         "Homebrew tap: `nclandrei/homebrew-tap`",
-        "formula installs from the published crates.io source package",
+        "formula builds from the tagged GitHub source archive",
         "Release workflow: `.github/workflows/release.yml`",
         "One-shot artifacts: resolve, snapshot, evidence, synthesis, review, verify",
     ] {
@@ -264,7 +264,7 @@ fn local_checks_script_is_executable() {
 }
 
 #[test]
-fn homebrew_formula_renderer_outputs_crates_io_formula() {
+fn homebrew_formula_renderer_outputs_github_archive_formula() {
     let output_dir = tempfile::tempdir().unwrap();
     let output_path = output_dir.path().join("mcpsmith.rb");
 
@@ -278,11 +278,11 @@ fn homebrew_formula_renderer_outputs_crates_io_formula() {
 
     let formula = fs::read_to_string(&output_path).expect("failed to read rendered formula");
     for needle in [
-        "homepage \"https://crates.io/crates/mcpsmith\"",
-        "url \"https://static.crates.io/crates/mcpsmith/mcpsmith-9.9.9.crate\"",
+        "homepage \"https://github.com/nclandrei/mcpsmith\"",
+        "url \"https://github.com/nclandrei/mcpsmith/archive/refs/tags/v9.9.9.tar.gz\"",
         "version \"9.9.9\"",
         "sha256 \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
-        "system \"cargo\", \"install\", *std_cargo_args",
+        "system \"cargo\", \"install\", *std_cargo_args(path: \".\")",
         "assert_match \"Usage: mcpsmith\", shell_output(\"#{bin}/mcpsmith --help\")",
     ] {
         assert!(
