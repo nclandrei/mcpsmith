@@ -2,7 +2,7 @@ use crate::backend::{
     map_low_confidence_tool_with_backend, prepare_backend_context,
     review_tool_conversion_with_backend, synthesize_tool_conversion_with_backend,
 };
-use crate::install::{remove_server_from_config, rollback_server_skill_files};
+use crate::install::{remove_servers_from_config, rollback_server_skill_files};
 use crate::runtime::introspect_tool_specs;
 use crate::skillset::{build_from_bundle, default_agents_skills_dir};
 use crate::{
@@ -288,6 +288,8 @@ pub struct RunReport {
     pub skills_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_backup: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_backups: Vec<PathBuf>,
     #[serde(default)]
     pub mcp_config_updated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -459,7 +461,7 @@ fn resolve_server(servers: &[MCPServerProfile], server_selector: &str) -> Result
 
     if let Some(found) = servers
         .iter()
-        .find(|s| s.id.eq_ignore_ascii_case(selector))
+        .find(|s| s.matches_selector(selector))
         .cloned()
     {
         return Ok(found);
@@ -467,7 +469,11 @@ fn resolve_server(servers: &[MCPServerProfile], server_selector: &str) -> Result
 
     let mut by_name = servers
         .iter()
-        .filter(|s| s.name.eq_ignore_ascii_case(selector))
+        .filter(|s| {
+            s.configured_names()
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(selector))
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -494,6 +500,20 @@ fn resolve_server(servers: &[MCPServerProfile], server_selector: &str) -> Result
     }
 
     Ok(by_name.remove(0))
+}
+
+fn grouped_config_targets(server: &MCPServerProfile) -> Vec<(PathBuf, Vec<String>)> {
+    let mut grouped = BTreeMap::<PathBuf, Vec<String>>::new();
+    for config_ref in server.config_refs_or_primary() {
+        let entry = grouped.entry(config_ref.source_path).or_default();
+        if !entry
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&config_ref.server_name))
+        {
+            entry.push(config_ref.server_name);
+        }
+    }
+    grouped.into_iter().collect()
 }
 
 pub fn resolve_artifact(
@@ -1135,6 +1155,7 @@ fn run_pipeline_inner(
             artifacts,
             skills_dir: None,
             config_backup: None,
+            config_backups: vec![],
             mcp_config_updated: false,
             diagnostics: verify
                 .issues
@@ -1170,45 +1191,54 @@ fn run_pipeline_inner(
     let orchestrator = built.orchestrator_skill_path.clone();
     let tool_paths = built.tool_skill_paths.clone();
     let mut diagnostics = built.notes.clone();
-    let mut config_backup = None;
+    let mut config_backups = Vec::new();
     let mut config_updated = false;
 
     if !options.dry_run {
-        let (backup, updated) = run_pipeline_stage(
+        let (backups, updated) = run_pipeline_stage(
             progress,
             PipelineRunStage::UpdateConfig,
             8,
             total_steps,
-            || match remove_server_from_config(
-                &review.bundle.evidence.server.source_path,
-                &review.bundle.evidence.server.name,
-            ) {
-                Ok(result) => Ok(result),
-                Err(err) => {
-                    rollback_server_skill_files(&orchestrator, &tool_paths);
-                    Err(err).with_context(|| {
-                        format!(
-                            "Failed to mutate MCP config for '{}'; generated skill files were rolled back.",
-                            review.bundle.evidence.server.id
-                        )
-                    })
+            || {
+                let mut backups = Vec::new();
+                let mut updated = false;
+
+                for (config_path, server_names) in
+                    grouped_config_targets(&review.bundle.evidence.server)
+                {
+                    match remove_servers_from_config(&config_path, &server_names) {
+                        Ok((backup, removed_names)) => {
+                            if removed_names.len() != server_names.len() {
+                                rollback_server_skill_files(&orchestrator, &tool_paths);
+                                bail!(
+                                    "MCP config entries '{}' not found in {}. Rolled back generated skills to keep conversion atomic.",
+                                    server_names.join(", "),
+                                    config_path.display()
+                                );
+                            }
+                            if let Some(backup) = backup {
+                                backups.push(backup);
+                            }
+                            updated = true;
+                        }
+                        Err(err) => {
+                            rollback_server_skill_files(&orchestrator, &tool_paths);
+                            return Err(err).with_context(|| {
+                                format!(
+                                    "Failed to mutate MCP config for '{}'; generated skill files were rolled back.",
+                                    review.bundle.evidence.server.id
+                                )
+                            });
+                        }
+                    }
                 }
+
+                Ok((backups, updated))
             },
         )?;
-        match (backup, updated) {
-            (backup, true) => {
-                config_backup = backup;
-                config_updated = true;
-            }
-            (_backup, false) => {
-                rollback_server_skill_files(&orchestrator, &tool_paths);
-                bail!(
-                    "MCP config entry '{}' not found in {}. Rolled back generated skills to keep conversion atomic.",
-                    review.bundle.evidence.server.name,
-                    review.bundle.evidence.server.source_path.display()
-                );
-            }
-        }
+        config_backups = backups;
+        config_updated = updated;
         diagnostics.push(format!(
             "Installed skills under {}.",
             orchestrator.parent().unwrap_or(&skills_dir).display()
@@ -1229,7 +1259,8 @@ fn run_pipeline_inner(
         },
         artifacts,
         skills_dir: Some(skills_dir),
-        config_backup,
+        config_backup: config_backups.first().cloned(),
+        config_backups,
         mcp_config_updated: config_updated,
         diagnostics,
         next_action: None,
@@ -2745,6 +2776,7 @@ mod tests {
                 inspected_urls: vec![],
                 derivation_evidence: vec![],
             },
+            config_refs: vec![],
         }
     }
 

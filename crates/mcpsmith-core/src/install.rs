@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,17 +19,27 @@ pub(crate) fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[Pat
     }
 }
 
-pub(crate) fn remove_server_from_config(
+pub(crate) fn remove_servers_from_config(
     path: &Path,
-    server_name: &str,
-) -> Result<(Option<PathBuf>, bool)> {
+    server_names: &[String],
+) -> Result<(Option<PathBuf>, Vec<String>)> {
+    let requested = server_names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    if requested.is_empty() {
+        return Ok((None, vec![]));
+    }
+
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config {}", path.display()))?;
 
     if let Ok(mut root) = serde_json::from_str::<Value>(&raw) {
-        let removed = remove_server_from_json(&mut root, server_name);
-        if !removed {
-            return Ok((None, false));
+        let removed = remove_servers_from_json(&mut root, &requested);
+        if removed.is_empty() {
+            return Ok((None, vec![]));
         }
 
         let backup = backup_file(path)?;
@@ -36,13 +47,13 @@ pub(crate) fn remove_server_from_config(
             .context("Failed to serialize updated JSON MCP config")?;
         std::fs::write(path, format!("{body}\n"))
             .with_context(|| format!("Failed to write config {}", path.display()))?;
-        return Ok((Some(backup), true));
+        return Ok((Some(backup), removed));
     }
 
     if let Ok(mut root) = toml::from_str::<toml::Value>(&raw) {
-        let removed = remove_server_from_toml(&mut root, server_name);
-        if !removed {
-            return Ok((None, false));
+        let removed = remove_servers_from_toml(&mut root, &requested);
+        if removed.is_empty() {
+            return Ok((None, vec![]));
         }
 
         let backup = backup_file(path)?;
@@ -50,7 +61,7 @@ pub(crate) fn remove_server_from_config(
             toml::to_string_pretty(&root).context("Failed to serialize updated TOML MCP config")?;
         std::fs::write(path, body)
             .with_context(|| format!("Failed to write config {}", path.display()))?;
-        return Ok((Some(backup), true));
+        return Ok((Some(backup), removed));
     }
 
     bail!(
@@ -59,57 +70,62 @@ pub(crate) fn remove_server_from_config(
     )
 }
 
-fn remove_server_from_json(root: &mut Value, server_name: &str) -> bool {
-    let mut removed = false;
+fn remove_servers_from_json(root: &mut Value, server_names: &BTreeSet<String>) -> Vec<String> {
+    let mut removed = BTreeSet::new();
 
     if let Some(obj) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
-        removed |= obj.remove(server_name).is_some();
+        remove_names_from_json_object(obj, server_names, &mut removed);
     }
     if let Some(obj) = root.get_mut("mcp_servers").and_then(Value::as_object_mut) {
-        removed |= obj.remove(server_name).is_some();
+        remove_names_from_json_object(obj, server_names, &mut removed);
     }
     if let Some(obj) = root.get_mut("servers").and_then(Value::as_object_mut) {
-        removed |= obj.remove(server_name).is_some();
+        remove_names_from_json_object(obj, server_names, &mut removed);
     }
     if let Some(obj) = root
         .get_mut("amp.mcpServers")
         .and_then(Value::as_object_mut)
     {
-        removed |= obj.remove(server_name).is_some();
+        remove_names_from_json_object(obj, server_names, &mut removed);
     }
 
     if let Some(amp) = root.get_mut("amp").and_then(Value::as_object_mut)
         && let Some(obj) = amp.get_mut("mcpServers").and_then(Value::as_object_mut)
     {
-        removed |= obj.remove(server_name).is_some();
+        remove_names_from_json_object(obj, server_names, &mut removed);
     }
 
     if let Some(obj) = root.as_object_mut() {
-        let should_remove = obj.get(server_name).is_some_and(likely_server_object);
-        if should_remove {
-            removed |= obj.remove(server_name).is_some();
+        for server_name in server_names {
+            let should_remove = obj.get(server_name).is_some_and(likely_server_object);
+            if should_remove && obj.remove(server_name).is_some() {
+                removed.insert(server_name.clone());
+            }
         }
     }
 
-    removed
+    removed.into_iter().collect()
 }
 
-fn remove_server_from_toml(root: &mut toml::Value, server_name: &str) -> bool {
-    let mut removed = false;
+fn remove_servers_from_toml(
+    root: &mut toml::Value,
+    server_names: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut removed = BTreeSet::new();
 
     if let Some(table) = root.as_table_mut() {
         if let Some(mcp_servers) = table
             .get_mut("mcp_servers")
             .and_then(toml::Value::as_table_mut)
         {
-            removed |= mcp_servers.remove(server_name).is_some();
+            remove_names_from_toml_table(mcp_servers, server_names, &mut removed);
         }
 
         if let Some(amp_mcp) = table
             .get_mut("amp.mcpServers")
             .and_then(toml::Value::as_table_mut)
         {
-            removed |= amp_mcp.remove(server_name).is_some();
+            remove_names_from_toml_table(amp_mcp, server_names, &mut removed);
         }
 
         if let Some(amp) = table.get_mut("amp").and_then(toml::Value::as_table_mut)
@@ -117,11 +133,35 @@ fn remove_server_from_toml(root: &mut toml::Value, server_name: &str) -> bool {
                 .get_mut("mcpServers")
                 .and_then(toml::Value::as_table_mut)
         {
-            removed |= mcp.remove(server_name).is_some();
+            remove_names_from_toml_table(mcp, server_names, &mut removed);
         }
     }
 
-    removed
+    removed.into_iter().collect()
+}
+
+fn remove_names_from_json_object(
+    obj: &mut serde_json::Map<String, Value>,
+    server_names: &BTreeSet<String>,
+    removed: &mut BTreeSet<String>,
+) {
+    for server_name in server_names {
+        if obj.remove(server_name).is_some() {
+            removed.insert(server_name.clone());
+        }
+    }
+}
+
+fn remove_names_from_toml_table(
+    table: &mut toml::map::Map<String, toml::Value>,
+    server_names: &BTreeSet<String>,
+    removed: &mut BTreeSet<String>,
+) {
+    for server_name in server_names {
+        if table.remove(server_name).is_some() {
+            removed.insert(server_name.clone());
+        }
+    }
 }
 
 fn backup_file(path: &Path) -> Result<PathBuf> {

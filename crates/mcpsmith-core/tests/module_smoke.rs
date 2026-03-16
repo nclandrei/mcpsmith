@@ -42,6 +42,7 @@ fn sample_server(root: &Path) -> MCPServerProfile {
             inspected_urls: vec![],
             derivation_evidence: vec![],
         },
+        config_refs: vec![],
     }
 }
 

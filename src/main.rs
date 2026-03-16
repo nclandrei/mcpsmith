@@ -186,7 +186,7 @@ Use --skills-dir to write into an isolated preview directory.
     after_help = ROOT_AFTER_HELP
 )]
 struct Cli {
-    /// Server id (`source:name`) or unique configured MCP name for one-shot conversion
+    /// Logical server id, legacy `source:name` selector, or unique configured MCP name
     server: Option<String>,
     /// Emit machine-readable JSON instead of the default human summary
     #[arg(long)]
@@ -228,7 +228,7 @@ enum Commands {
     },
     #[command(long_about = RESOLVE_LONG_ABOUT, after_help = RESOLVE_AFTER_HELP)]
     Resolve {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: String,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -239,7 +239,7 @@ enum Commands {
     },
     #[command(long_about = SNAPSHOT_LONG_ABOUT, after_help = SNAPSHOT_AFTER_HELP)]
     Snapshot {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: Option<String>,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -253,7 +253,7 @@ enum Commands {
     },
     #[command(long_about = EVIDENCE_LONG_ABOUT, after_help = EVIDENCE_AFTER_HELP)]
     Evidence {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: Option<String>,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -270,7 +270,7 @@ enum Commands {
     },
     #[command(long_about = SYNTHESIZE_LONG_ABOUT, after_help = SYNTHESIZE_AFTER_HELP)]
     Synthesize {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: Option<String>,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -293,7 +293,7 @@ enum Commands {
     },
     #[command(long_about = REVIEW_LONG_ABOUT, after_help = REVIEW_AFTER_HELP)]
     Review {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: Option<String>,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -313,7 +313,7 @@ enum Commands {
     },
     #[command(long_about = VERIFY_LONG_ABOUT, after_help = VERIFY_AFTER_HELP)]
     Verify {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: Option<String>,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]
@@ -333,7 +333,7 @@ enum Commands {
     },
     #[command(long_about = RUN_LONG_ABOUT, after_help = RUN_AFTER_HELP)]
     Run {
-        /// Server id (`source:name`) or unique configured MCP name
+        /// Logical server id, legacy `source:name` selector, or unique configured MCP name
         server: String,
         /// Emit machine-readable JSON instead of the default human summary
         #[arg(long)]

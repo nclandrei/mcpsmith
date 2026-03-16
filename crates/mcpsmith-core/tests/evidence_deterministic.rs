@@ -80,6 +80,7 @@ fn sample_server(
             inspected_urls: vec![],
             derivation_evidence: vec![],
         },
+        config_refs: vec![],
     }
 }
 

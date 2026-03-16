@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 mod backend;
@@ -162,6 +163,19 @@ pub struct SourceGrounding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MCPConfigRef {
+    pub source_label: String,
+    pub source_path: PathBuf,
+    pub server_name: String,
+}
+
+impl MCPConfigRef {
+    pub fn selector(&self) -> String {
+        format!("{}:{}", self.source_label, self.server_name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MCPServerProfile {
     pub id: String,
     pub name: String,
@@ -179,6 +193,39 @@ pub struct MCPServerProfile {
     pub recommendation_reason: String,
     #[serde(default)]
     pub source_grounding: SourceGrounding,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_refs: Vec<MCPConfigRef>,
+}
+
+impl MCPServerProfile {
+    pub fn config_refs_or_primary(&self) -> Vec<MCPConfigRef> {
+        if self.config_refs.is_empty() {
+            vec![MCPConfigRef {
+                source_label: self.source_label.clone(),
+                source_path: self.source_path.clone(),
+                server_name: self.name.clone(),
+            }]
+        } else {
+            self.config_refs.clone()
+        }
+    }
+
+    pub fn configured_names(&self) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        names.insert(self.name.clone());
+        for config_ref in self.config_refs_or_primary() {
+            names.insert(config_ref.server_name);
+        }
+        names.into_iter().collect()
+    }
+
+    pub fn matches_selector(&self, selector: &str) -> bool {
+        self.id.eq_ignore_ascii_case(selector)
+            || self
+                .config_refs_or_primary()
+                .iter()
+                .any(|config_ref| config_ref.selector().eq_ignore_ascii_case(selector))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

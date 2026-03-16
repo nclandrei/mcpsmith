@@ -27,6 +27,21 @@ fn write_playwright_config(ctx: &TestContext, command: &Path, read_only: Option<
     );
 }
 
+fn write_playwright_config_to_path(
+    ctx: &TestContext,
+    path: &Path,
+    command: &Path,
+    read_only: Option<bool>,
+) {
+    ctx.write_server_config_to_path(
+        path,
+        "playwright",
+        command,
+        Some("Read-only browser helpers"),
+        read_only,
+    );
+}
+
 fn write_low_confidence_source_layout(ctx: &TestContext, tool_name: &str) {
     fs::create_dir_all(ctx.path("source/src")).unwrap();
     fs::write(
@@ -422,13 +437,64 @@ fn test_mcpsmith_discover_lists_local_servers() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Discovered 2 MCP servers."))
-        .stdout(predicate::str::contains("custom-1:playwright"))
-        .stdout(predicate::str::contains("custom-1:remote-demo"))
+        .stdout(predicate::str::contains("- playwright"))
+        .stdout(predicate::str::contains("- remote-demo"))
         .stdout(predicate::str::contains("Read-only browser helpers"))
         .stdout(predicate::str::contains(
             config_path.to_string_lossy().to_string(),
         ))
         .stdout(predicate::str::contains("https://example.com/mcp"));
+}
+
+#[test]
+fn test_mcpsmith_discover_merges_duplicate_server_configs() {
+    let ctx = TestContext::new();
+    let config_one = ctx.path("codex.json");
+    let config_two = ctx.path("claude.json");
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+
+    write_playwright_config_to_path(&ctx, &config_one, &mock_mcp, Some(true));
+    write_playwright_config_to_path(&ctx, &config_two, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .args(["discover", "--config"])
+        .arg(&config_one)
+        .args(["--config"])
+        .arg(&config_two)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Discovered 1 MCP server."))
+        .stdout(predicate::str::contains("- playwright"))
+        .stdout(predicate::str::contains("configs:"))
+        .stdout(predicate::str::contains(
+            config_one.to_string_lossy().to_string(),
+        ))
+        .stdout(predicate::str::contains(
+            config_two.to_string_lossy().to_string(),
+        ));
+}
+
+#[test]
+fn test_mcpsmith_resolve_accepts_legacy_source_selector_for_merged_server() {
+    let ctx = TestContext::new();
+    let config_one = ctx.path("codex.json");
+    let config_two = ctx.path("claude.json");
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+
+    write_playwright_config_to_path(&ctx, &config_one, &mock_mcp, Some(true));
+    write_playwright_config_to_path(&ctx, &config_two, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .args(["resolve", "custom-1:playwright", "--config"])
+        .arg(&config_one)
+        .args(["--config"])
+        .arg(&config_two)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resolved playwright"))
+        .stdout(predicate::str::contains("Artifact kind: LocalPath"));
 }
 
 #[test]
@@ -874,6 +940,52 @@ fn test_mcpsmith_bare_one_shot_applies_skills_and_updates_config() {
     let updated = fs::read_to_string(&config_path).unwrap();
     assert!(!updated.contains("playwright"));
     assert_eq!(count_backups(&config_path), 1);
+}
+
+#[test]
+fn test_mcpsmith_bare_one_shot_applies_skills_and_updates_all_matching_configs() {
+    let ctx = TestContext::new();
+    let config_one = ctx.path("codex.json");
+    let config_two = ctx.path("claude.json");
+    let skills_dir = ctx.skills_dir();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config_to_path(&ctx, &config_one, &mock_mcp, Some(true));
+    write_playwright_config_to_path(&ctx, &config_two, &mock_mcp, Some(true));
+
+    let run = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["playwright", "--json", "--backend", "codex", "--config"])
+            .arg(&config_one)
+            .args(["--config"])
+            .arg(&config_two)
+            .args(["--skills-dir"])
+            .arg(&skills_dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    assert_eq!(run["status"].as_str().unwrap(), "applied");
+    assert!(ctx.orchestrator_skill_path("playwright").exists());
+    assert!(ctx.tool_skill_path("playwright", "execute").exists());
+    assert!(ctx.manifest_path("playwright").exists());
+
+    let config_backups = run["config_backups"].as_array().unwrap();
+    assert_eq!(config_backups.len(), 2);
+
+    let updated_one = fs::read_to_string(&config_one).unwrap();
+    let updated_two = fs::read_to_string(&config_two).unwrap();
+    assert!(!updated_one.contains("playwright"));
+    assert!(!updated_two.contains("playwright"));
+    assert_eq!(count_backups(&config_one), 1);
+    assert_eq!(count_backups(&config_two), 1);
 }
 
 #[test]

@@ -250,8 +250,23 @@ pub fn run_discover_cmd(json: bool, config_paths: &[PathBuf]) -> Result<()> {
                 .as_deref()
                 .or(server.url.as_deref())
                 .unwrap_or("unknown");
-            println!("- {} ({})", server.id, server.name);
-            println!("  config: {}", server.source_path.display());
+            println!("- {}", server.id);
+            if server.name != server.id {
+                println!("  name: {}", server.name);
+            }
+            let config_refs = server.config_refs_or_primary();
+            if config_refs.len() == 1 {
+                println!("  config: {}", config_refs[0].source_path.display());
+            } else {
+                println!("  configs:");
+                for config_ref in &config_refs {
+                    println!(
+                        "    - {} [{}]",
+                        config_ref.source_path.display(),
+                        config_ref.selector()
+                    );
+                }
+            }
             println!("  launch: {launch}");
             println!(
                 "  permission={} recommendation={} tools={}",
@@ -537,7 +552,12 @@ pub fn run_run_cmd(
         if let Some(skills_dir) = &result.skills_dir {
             println!("Skills dir: {}", skills_dir.display());
         }
-        if let Some(backup) = &result.config_backup {
+        if result.config_backups.len() > 1 {
+            println!("Config backups:");
+            for backup in &result.config_backups {
+                println!("  - {}", backup.display());
+            }
+        } else if let Some(backup) = &result.config_backup {
             println!("Config backup: {}", backup.display());
         }
         for item in &result.diagnostics {

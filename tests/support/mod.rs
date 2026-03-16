@@ -81,6 +81,34 @@ impl TestContext {
         self.write_mcp_servers(servers);
     }
 
+    pub fn write_server_config_to_path(
+        &self,
+        path: &Path,
+        server_name: &str,
+        command: &Path,
+        description: Option<&str>,
+        read_only: Option<bool>,
+    ) {
+        let mut server = Map::new();
+        server.insert(
+            "command".to_string(),
+            Value::String(command.to_string_lossy().into_owned()),
+        );
+        if let Some(description) = description {
+            server.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
+        if let Some(read_only) = read_only {
+            server.insert("readOnly".to_string(), Value::Bool(read_only));
+        }
+
+        let mut servers = Map::new();
+        servers.insert(server_name.to_string(), Value::Object(server));
+        self.write_mcp_servers_to_path(path, servers);
+    }
+
     pub fn write_remote_server_config(&self, server_name: &str, url: &str) {
         let mut server = Map::new();
         server.insert("url".to_string(), Value::String(url.to_string()));
@@ -91,11 +119,15 @@ impl TestContext {
     }
 
     pub fn write_mcp_servers(&self, servers: Map<String, Value>) {
+        self.write_mcp_servers_to_path(&self.config_path(), servers);
+    }
+
+    pub fn write_mcp_servers_to_path(&self, path: &Path, servers: Map<String, Value>) {
         let mut root = Map::new();
         root.insert("mcpServers".to_string(), Value::Object(servers));
 
         fs::write(
-            self.config_path(),
+            path,
             serde_json::to_string_pretty(&Value::Object(root)).unwrap(),
         )
         .unwrap();

@@ -1,13 +1,13 @@
 use crate::{
     ConfigSource, ConversionRecommendation, ConvertInventory, DerivationEvidence,
-    DerivationEvidenceKind, MCPServerProfile, PermissionLevel, SourceEvidenceLevel,
+    DerivationEvidenceKind, MCPConfigRef, MCPServerProfile, PermissionLevel, SourceEvidenceLevel,
     SourceGrounding, SourceKind,
 };
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use chrono::Utc;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -107,7 +107,7 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
 
             servers.push(MCPServerProfile {
                 id: format!("{}:{}", source.label, name),
-                name,
+                name: name.clone(),
                 source_label: source.label.clone(),
                 source_path: source.path.clone(),
                 purpose,
@@ -121,10 +121,16 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
                 recommendation,
                 recommendation_reason,
                 source_grounding,
+                config_refs: vec![MCPConfigRef {
+                    source_label: source.label.clone(),
+                    source_path: source.path.clone(),
+                    server_name: name,
+                }],
             });
         }
     }
 
+    let mut servers = merge_discovered_servers(servers);
     servers.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(ConvertInventory {
@@ -132,6 +138,297 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
         searched_paths: sources.iter().map(|s| s.path.clone()).collect(),
         servers,
     })
+}
+
+fn merge_discovered_servers(servers: Vec<MCPServerProfile>) -> Vec<MCPServerProfile> {
+    let mut grouped = BTreeMap::<String, Vec<MCPServerProfile>>::new();
+    for server in servers {
+        grouped
+            .entry(logical_server_key(&server))
+            .or_default()
+            .push(server);
+    }
+
+    let mut merged = grouped
+        .into_values()
+        .map(|group| merge_server_group(&group))
+        .collect::<Vec<_>>();
+    assign_logical_ids(&mut merged);
+    merged
+}
+
+fn merge_server_group(group: &[MCPServerProfile]) -> MCPServerProfile {
+    let mut merged = select_representative_server(group).clone();
+    let primary_name = select_primary_name(group);
+    let config_refs = merge_config_refs(group);
+    let primary_ref = config_refs
+        .iter()
+        .find(|config_ref| config_ref.server_name.eq_ignore_ascii_case(&primary_name))
+        .cloned()
+        .unwrap_or_else(|| {
+            config_refs.first().cloned().unwrap_or(MCPConfigRef {
+                source_label: merged.source_label.clone(),
+                source_path: merged.source_path.clone(),
+                server_name: primary_name.clone(),
+            })
+        });
+
+    merged.id.clear();
+    merged.name = primary_name;
+    merged.source_label = primary_ref.source_label.clone();
+    merged.source_path = primary_ref.source_path.clone();
+    merged.purpose = select_primary_purpose(group);
+    merged.env_keys = merge_sorted_strings(group.iter().flat_map(|server| server.env_keys.iter()));
+    merged.permission_hints = merge_sorted_strings(
+        group
+            .iter()
+            .flat_map(|server| server.permission_hints.iter()),
+    );
+    merged.declared_tool_count = group
+        .iter()
+        .map(|server| server.declared_tool_count)
+        .max()
+        .unwrap_or(0);
+    merged.inferred_permission = group
+        .iter()
+        .map(|server| server.inferred_permission.clone())
+        .max_by_key(permission_rank)
+        .unwrap_or(PermissionLevel::Unknown);
+    let (recommendation, recommendation_reason) = recommend_conversion(
+        merged.inferred_permission.clone(),
+        merged.url.as_deref(),
+        &merged.env_keys,
+        merged.declared_tool_count,
+    );
+    merged.recommendation = recommendation;
+    merged.recommendation_reason = recommendation_reason;
+    merged.config_refs = config_refs;
+    merged
+}
+
+fn assign_logical_ids(servers: &mut [MCPServerProfile]) {
+    let mut by_name = BTreeMap::<String, Vec<usize>>::new();
+    for (idx, server) in servers.iter().enumerate() {
+        by_name
+            .entry(server.name.to_ascii_lowercase())
+            .or_default()
+            .push(idx);
+    }
+
+    for indexes in by_name.values_mut() {
+        indexes.sort_by(|left, right| {
+            let left_key = logical_server_key(&servers[*left]);
+            let right_key = logical_server_key(&servers[*right]);
+            left_key.cmp(&right_key)
+        });
+        if indexes.len() == 1 {
+            let idx = indexes[0];
+            servers[idx].id = servers[idx].name.clone();
+            continue;
+        }
+
+        for (offset, idx) in indexes.iter().enumerate() {
+            servers[*idx].id = format!("{}#{}", servers[*idx].name, offset + 1);
+        }
+    }
+}
+
+fn select_representative_server(group: &[MCPServerProfile]) -> &MCPServerProfile {
+    group
+        .iter()
+        .max_by_key(|server| {
+            (
+                evidence_rank(server.source_grounding.evidence_level),
+                u8::from(server.source_grounding.entrypoint.is_some()),
+                u8::from(server.source_grounding.package_name.is_some()),
+                u8::from(server.source_grounding.repository_url.is_some()),
+                server.id.clone(),
+            )
+        })
+        .expect("server group should not be empty")
+}
+
+fn select_primary_name(group: &[MCPServerProfile]) -> String {
+    let mut names = BTreeMap::<String, (usize, String)>::new();
+    for server in group {
+        for config_ref in server.config_refs_or_primary() {
+            let key = config_ref.server_name.to_ascii_lowercase();
+            let entry = names
+                .entry(key)
+                .or_insert((0, config_ref.server_name.clone()));
+            entry.0 += 1;
+            if config_ref.server_name.len() < entry.1.len()
+                || (config_ref.server_name.len() == entry.1.len()
+                    && config_ref.server_name < entry.1)
+            {
+                entry.1 = config_ref.server_name;
+            }
+        }
+    }
+
+    names
+        .into_values()
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.len().cmp(&left.1.len()))
+                .then_with(|| right.1.cmp(&left.1))
+        })
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| "mcp-server".to_string())
+}
+
+fn select_primary_purpose(group: &[MCPServerProfile]) -> String {
+    group
+        .iter()
+        .map(|server| server.purpose.trim())
+        .filter(|purpose| !purpose.is_empty())
+        .max_by(|left, right| left.len().cmp(&right.len()).then_with(|| right.cmp(left)))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "No purpose detected.".to_string())
+}
+
+fn merge_config_refs(group: &[MCPServerProfile]) -> Vec<MCPConfigRef> {
+    let mut refs = group
+        .iter()
+        .flat_map(|server| server.config_refs_or_primary())
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| {
+        left.source_label
+            .cmp(&right.source_label)
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.server_name.cmp(&right.server_name))
+    });
+    refs.dedup_by(|left, right| {
+        left.source_label == right.source_label
+            && left.source_path == right.source_path
+            && left.server_name == right.server_name
+    });
+    refs
+}
+
+fn merge_sorted_strings<'a>(values: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut out = values
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
+fn permission_rank(level: &PermissionLevel) -> u8 {
+    match level {
+        PermissionLevel::Unknown => 0,
+        PermissionLevel::ReadOnly => 1,
+        PermissionLevel::Write => 2,
+        PermissionLevel::Destructive => 3,
+    }
+}
+
+fn evidence_rank(level: SourceEvidenceLevel) -> u8 {
+    match level {
+        SourceEvidenceLevel::RuntimeOnly => 0,
+        SourceEvidenceLevel::ConfigOnly => 1,
+        SourceEvidenceLevel::SourceInspected => 2,
+    }
+}
+
+fn logical_server_key(server: &MCPServerProfile) -> String {
+    format!(
+        "{}|{}",
+        runtime_launch_key(server),
+        source_identity_key(server)
+    )
+}
+
+fn runtime_launch_key(server: &MCPServerProfile) -> String {
+    if let Some(url) = server.url.as_deref() {
+        return format!("url:{}", url.trim().to_ascii_lowercase());
+    }
+
+    format!(
+        "cmd:{}|args:{}|env:{}",
+        server
+            .command
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase(),
+        server.args.join("\u{1f}"),
+        server.env_keys.join("\u{1f}")
+    )
+}
+
+fn source_identity_key(server: &MCPServerProfile) -> String {
+    match server.source_grounding.kind {
+        SourceKind::LocalPath => server
+            .source_grounding
+            .entrypoint
+            .as_ref()
+            .map(|path| format!("local:{}", path.display()))
+            .unwrap_or_else(|| "local:unknown".to_string()),
+        SourceKind::NpmPackage => format!(
+            "npm:{}@{}",
+            server
+                .source_grounding
+                .package_name
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_ascii_lowercase(),
+            server
+                .source_grounding
+                .package_version
+                .as_deref()
+                .unwrap_or("*")
+        ),
+        SourceKind::PypiPackage => format!(
+            "pypi:{}@{}",
+            server
+                .source_grounding
+                .package_name
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_ascii_lowercase(),
+            server
+                .source_grounding
+                .package_version
+                .as_deref()
+                .unwrap_or("*")
+        ),
+        SourceKind::RepositoryUrl => format!(
+            "repo:{}",
+            server
+                .source_grounding
+                .repository_url
+                .as_deref()
+                .unwrap_or("unknown")
+                .trim()
+                .to_ascii_lowercase()
+        ),
+        SourceKind::RemoteUrl => format!(
+            "remote:{}",
+            server
+                .url
+                .as_deref()
+                .unwrap_or("unknown")
+                .trim()
+                .to_ascii_lowercase()
+        ),
+        SourceKind::Unknown => format!(
+            "unknown:{}",
+            server
+                .source_grounding
+                .repository_url
+                .as_deref()
+                .or(server.url.as_deref())
+                .unwrap_or("unknown")
+                .trim()
+                .to_ascii_lowercase()
+        ),
+    }
 }
 
 pub fn discover_inventory(additional_paths: &[PathBuf]) -> Result<ConvertInventory> {
@@ -1863,6 +2160,60 @@ mod tests {
                             .source
                             .contains("/repos/acme/repo-mcp/contents/README.md")
                 })
+        );
+    }
+
+    #[test]
+    fn discover_merges_duplicate_server_entries_across_config_sources() {
+        let _guard = source_env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_one = dir.path().join("codex.json");
+        let config_two = dir.path().join("claude.json");
+
+        let body = r#"{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@1.0.0"],
+      "description": "Browser inspection and debugging workflows"
+    }
+  }
+}"#;
+        std::fs::write(&config_one, body).unwrap();
+        std::fs::write(&config_two, body).unwrap();
+
+        let inventory = discover_from_sources(&[
+            ConfigSource {
+                label: "codex-global-toml".to_string(),
+                path: config_one.clone(),
+            },
+            ConfigSource {
+                label: "claude-global-settings".to_string(),
+                path: config_two.clone(),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(inventory.servers.len(), 1);
+        let server = &inventory.servers[0];
+        assert_eq!(server.id, "chrome-devtools");
+        assert_eq!(server.name, "chrome-devtools");
+        assert_eq!(server.config_refs.len(), 2);
+        assert_eq!(
+            server
+                .config_refs
+                .iter()
+                .map(|item| item.source_label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-global-settings", "codex-global-toml"]
+        );
+        assert_eq!(
+            server
+                .config_refs
+                .iter()
+                .map(|item| item.source_path.clone())
+                .collect::<Vec<_>>(),
+            vec![config_two, config_one]
         );
     }
 }
