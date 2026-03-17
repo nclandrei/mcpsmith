@@ -25,7 +25,7 @@ Inspection and staged flow:
 
 Every command is non-interactive. Use --json for machine-readable output and --dry-run to avoid mutating installed skills or MCP config.
 Artifacts are written under .codex-runtime/stages/.
-Catalog sync defaults to official + smithery.
+Catalog sync defaults to official + smithery + glama.
 ";
 
 const ROOT_AFTER_HELP: &str = "\
@@ -51,7 +51,7 @@ Inspect or refresh the public MCP catalog snapshot that mcpsmith uses for census
 const CATALOG_SYNC_LONG_ABOUT: &str = "\
 Fetch provider data and write a normalized catalog snapshot.
 
-Defaults to the official registry and Smithery.
+Defaults to the official registry, Smithery, and Glama.
 Repeat --provider to override the default provider set.
 ";
 

@@ -247,6 +247,40 @@ fn handle_registry_request(stream: &mut TcpStream) {
   ],
   "pagination": { "totalPages": 1 }
 }"#
+    } else if path.starts_with("/glama/servers") {
+        r#"{
+  "pageInfo": {
+    "endCursor": null,
+    "hasNextPage": false,
+    "hasPreviousPage": false,
+    "startCursor": null
+  },
+  "servers": [
+    {
+      "id": "glama-test-1",
+      "name": "glama-demo",
+      "namespace": "acme",
+      "slug": "glama-demo",
+      "description": "Glama test server with repo",
+      "repository": { "url": "https://github.com/acme/glama-demo" },
+      "attributes": ["hosting:local-only"],
+      "url": "https://glama.ai/mcp/servers/glama-test-1",
+      "tools": [],
+      "spdxLicense": null
+    },
+    {
+      "id": "glama-test-2",
+      "name": "glama-remote",
+      "namespace": "acme",
+      "slug": "glama-remote",
+      "description": "Glama remote-only test server",
+      "attributes": ["hosting:remote-capable"],
+      "url": "https://glama.ai/mcp/servers/glama-test-2",
+      "tools": [],
+      "spdxLicense": null
+    }
+  ]
+}"#
     } else {
         r#"{"error":"not-found"}"#
     };
@@ -357,7 +391,7 @@ fn test_mcpsmith_root_help_lists_agentic_pipeline() {
             "Artifacts are written under .codex-runtime/stages/.",
         ))
         .stdout(predicate::str::contains(
-            "Catalog sync defaults to official + smithery.",
+            "Catalog sync defaults to official + smithery + glama.",
         ))
         .stdout(predicate::str::contains(
             "Every command is non-interactive.",
@@ -481,7 +515,7 @@ fn test_mcpsmith_catalog_sync_help_lists_default_providers() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Defaults to the official registry and Smithery.",
+            "Defaults to the official registry, Smithery, and Glama.",
         ))
         .stdout(predicate::str::contains(
             "Repeat --provider to override the default provider set.",
@@ -957,6 +991,139 @@ fn test_mcpsmith_catalog_sync_and_stats_use_machine_readable_endpoints() {
 }
 
 #[test]
+fn test_mcpsmith_catalog_sync_glama_provider_fetches_and_normalizes_records() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    let sync = parse_json_output(
+        &ctx.cmd()
+            .env(
+                "MCPSMITH_GLAMA_REGISTRY_BASE_URL",
+                format!("{}/glama", registry.base_url),
+            )
+            .args(["catalog", "sync", "--json", "--provider", "glama"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let providers = sync["result"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["provider"].as_str().unwrap(), "glama");
+    assert!(providers[0]["supported"].as_bool().unwrap());
+    assert_eq!(providers[0]["record_count"].as_u64().unwrap(), 2);
+
+    let servers = sync["result"]["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 2);
+
+    let resolvable = servers
+        .iter()
+        .find(|s| s["canonical_name"].as_str().unwrap() == "glama-demo")
+        .unwrap();
+    assert_eq!(
+        resolvable["source_resolution"]["status"].as_str().unwrap(),
+        "resolvable"
+    );
+    assert_eq!(
+        resolvable["source_resolution"]["kind"].as_str().unwrap(),
+        "repository-url"
+    );
+
+    let remote = servers
+        .iter()
+        .find(|s| s["canonical_name"].as_str().unwrap() == "glama-remote")
+        .unwrap();
+    assert_eq!(
+        remote["source_resolution"]["status"].as_str().unwrap(),
+        "remote-only"
+    );
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_glama_deduplicates_with_official() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    let sync = parse_json_output(
+        &ctx.cmd()
+            .env(
+                "MCPSMITH_OFFICIAL_REGISTRY_BASE_URL",
+                format!("{}/official", registry.base_url),
+            )
+            .env(
+                "MCPSMITH_GLAMA_REGISTRY_BASE_URL",
+                format!("{}/glama", registry.base_url),
+            )
+            .args([
+                "catalog",
+                "sync",
+                "--json",
+                "--provider",
+                "official",
+                "--provider",
+                "glama",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let providers = sync["result"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+
+    let stats = &sync["result"]["stats"];
+    assert!(stats["source_resolvable"].as_u64().unwrap() >= 2);
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_glama_writes_raw_capture() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    let sync = parse_json_output(
+        &ctx.cmd()
+            .env(
+                "MCPSMITH_GLAMA_REGISTRY_BASE_URL",
+                format!("{}/glama", registry.base_url),
+            )
+            .args(["catalog", "sync", "--json", "--provider", "glama"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let providers = sync["result"]["providers"].as_array().unwrap();
+    let glama = &providers[0];
+    let capture_path = glama["raw_capture_path"].as_str().unwrap();
+    assert!(PathBuf::from(capture_path).exists());
+    let raw: Value = serde_json::from_str(&fs::read_to_string(capture_path).unwrap()).unwrap();
+    let pages = raw.as_array().unwrap();
+    assert!(!pages.is_empty());
+    assert!(pages[0].get("servers").is_some());
+    assert!(pages[0].get("pageInfo").is_some());
+}
+
+#[test]
+fn test_mcpsmith_catalog_sync_human_output_shows_glama_stats() {
+    let ctx = TestContext::new();
+    let registry = StubRegistryServer::start();
+
+    ctx.cmd()
+        .env(
+            "MCPSMITH_GLAMA_REGISTRY_BASE_URL",
+            format!("{}/glama", registry.base_url),
+        )
+        .args(["catalog", "sync", "--provider", "glama"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("glama: supported=true records=2"))
+        .stdout(predicate::str::contains("resolvable=1"));
+}
+
+#[test]
 fn test_mcpsmith_catalog_sync_respects_official_registry_limit_cap() {
     let ctx = TestContext::new();
     let registry = StrictOfficialLimitRegistryServer::start();
@@ -972,7 +1139,7 @@ fn test_mcpsmith_catalog_sync_respects_official_registry_limit_cap() {
 }
 
 #[test]
-fn test_mcpsmith_catalog_sync_defaults_to_official_and_smithery_only() {
+fn test_mcpsmith_catalog_sync_defaults_to_all_three_providers() {
     let ctx = TestContext::new();
     let registry = StubRegistryServer::start();
 
@@ -986,6 +1153,10 @@ fn test_mcpsmith_catalog_sync_defaults_to_official_and_smithery_only() {
                 "MCPSMITH_SMITHERY_REGISTRY_BASE_URL",
                 format!("{}/smithery", registry.base_url),
             )
+            .env(
+                "MCPSMITH_GLAMA_REGISTRY_BASE_URL",
+                format!("{}/glama", registry.base_url),
+            )
             .args(["catalog", "sync", "--json"])
             .assert()
             .success()
@@ -998,10 +1169,11 @@ fn test_mcpsmith_catalog_sync_defaults_to_official_and_smithery_only() {
         .iter()
         .map(|provider| provider["provider"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(provider_names, vec!["official", "smithery"]);
-    assert_eq!(
-        sync["result"]["stats"]["unique_servers"].as_u64().unwrap(),
-        2
+    assert_eq!(provider_names, vec!["official", "smithery", "glama"]);
+    assert!(
+        providers
+            .iter()
+            .all(|provider| provider["supported"].as_bool().unwrap())
     );
     assert_eq!(
         sync["result"]["stats"]["unsupported_provider_records"]
