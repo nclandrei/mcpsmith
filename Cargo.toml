@@ -21,6 +21,7 @@ members = ["crates/mcpsmith-core"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 chrono = "0.4"
 mcpsmith-core = { version = "0.3.0", path = "crates/mcpsmith-core" }
 serde = { version = "1", features = ["derive"] }

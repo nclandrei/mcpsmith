@@ -1,7 +1,7 @@
 mod commands;
 mod config;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 const LONG_ABOUT: &str = "\
@@ -331,6 +331,12 @@ enum Commands {
         #[arg(long)]
         backend_auto: bool,
     },
+    /// Generate shell completions
+    #[command(hide = true)]
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
     #[command(long_about = RUN_LONG_ABOUT, after_help = RUN_AFTER_HELP)]
     Run {
         /// Logical server id, legacy `source:name` selector, or unique configured MCP name
@@ -484,6 +490,14 @@ fn main() -> anyhow::Result<()> {
                 backend_auto,
                 &app_config,
             )?;
+        }
+        Some(Commands::Completions { shell }) => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "mcpsmith",
+                &mut std::io::stdout(),
+            );
         }
         Some(Commands::Run {
             server,
