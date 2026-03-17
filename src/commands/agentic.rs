@@ -610,7 +610,7 @@ pub fn run_overview(json: bool) -> Result<()> {
                 notes: &[
                     "Every command is non-interactive.",
                     "Artifacts are written under .codex-runtime/stages/.",
-                    "Catalog sync defaults to official + smithery.",
+                    "Catalog sync defaults to official + smithery + glama.",
                 ],
             })?
         );
@@ -634,7 +634,7 @@ pub fn run_overview(json: bool) -> Result<()> {
     println!("Notes:");
     println!("  Every command is non-interactive.");
     println!("  Artifacts are written under .codex-runtime/stages/.");
-    println!("  Catalog sync defaults to official + smithery.");
+    println!("  Catalog sync defaults to official + smithery + glama.");
     Ok(())
 }
 

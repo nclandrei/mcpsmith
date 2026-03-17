@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 const OFFICIAL_REGISTRY_BASE: &str = "https://registry.modelcontextprotocol.io/v0.1";
 const SMITHERY_REGISTRY_BASE: &str = "https://registry.smithery.ai";
+const GLAMA_REGISTRY_BASE: &str = "https://glama.ai/api/mcp/v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
@@ -47,7 +48,11 @@ impl Default for CatalogSyncOptions {
 }
 
 fn default_catalog_providers() -> Vec<CatalogProvider> {
-    vec![CatalogProvider::Official, CatalogProvider::Smithery]
+    vec![
+        CatalogProvider::Official,
+        CatalogProvider::Smithery,
+        CatalogProvider::Glama,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,15 +184,9 @@ pub fn catalog_sync(options: &CatalogSyncOptions) -> Result<CatalogSyncResult> {
                 records.extend(fetched);
             }
             CatalogProvider::Glama => {
-                statuses.push(CatalogProviderStatus {
-                    provider,
-                    supported: false,
-                    record_count: 0,
-                    raw_capture_path: None,
-                    diagnostics: vec![
-                        "Glama is excluded from exact census because no stable machine-readable list API/export is configured.".to_string(),
-                    ],
-                });
+                let (status, fetched) = fetch_glama_records(&cache_root)?;
+                statuses.push(status);
+                records.extend(fetched);
             }
         }
     }
@@ -349,6 +348,11 @@ fn smithery_registry_base() -> String {
         .unwrap_or_else(|_| SMITHERY_REGISTRY_BASE.to_string())
 }
 
+fn glama_registry_base() -> String {
+    std::env::var("MCPSMITH_GLAMA_REGISTRY_BASE_URL")
+        .unwrap_or_else(|_| GLAMA_REGISTRY_BASE.to_string())
+}
+
 fn write_json(path: &Path, value: &Value) -> Result<()> {
     let body = serde_json::to_string_pretty(value).context("Failed to serialize JSON")?;
     fs::write(path, format!("{body}\n"))
@@ -472,6 +476,137 @@ fn normalize_smithery_record(entry: &Value) -> Option<CatalogProviderRecord> {
     })
 }
 
+fn fetch_glama_records(
+    cache_root: &Path,
+) -> Result<(CatalogProviderStatus, Vec<CatalogProviderRecord>)> {
+    let mut cursor: Option<String> = None;
+    let mut pages = Vec::<Value>::new();
+    let mut records = Vec::new();
+
+    loop {
+        let mut url = format!("{}/servers?first=100", glama_registry_base());
+        if let Some(cursor) = cursor.as_deref() {
+            url.push_str("&after=");
+            url.push_str(&url_encode_path_segment(cursor));
+        }
+
+        let page = fetch_json(&url)?;
+        let has_next = page
+            .get("pageInfo")
+            .and_then(|v| v.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = if has_next {
+            page.get("pageInfo")
+                .and_then(|v| v.get("endCursor"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        } else {
+            None
+        };
+        let entries = page
+            .get("servers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for entry in &entries {
+            if let Some(record) = normalize_glama_record(entry) {
+                records.push(record);
+            }
+        }
+        pages.push(page);
+
+        if next_cursor.is_none() {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    let capture_path = cache_root.join("glama-registry.raw.json");
+    write_json(&capture_path, &Value::Array(pages))?;
+    Ok((
+        CatalogProviderStatus {
+            provider: CatalogProvider::Glama,
+            supported: true,
+            record_count: records.len(),
+            raw_capture_path: Some(capture_path),
+            diagnostics: vec![],
+        },
+        records,
+    ))
+}
+
+fn normalize_glama_record(entry: &Value) -> Option<CatalogProviderRecord> {
+    let id = entry.get("id")?.as_str()?.trim().to_string();
+    let name = entry.get("name")?.as_str()?.trim().to_string();
+    let namespace = entry
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let slug = entry
+        .get("slug")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    let mut aliases = vec![];
+    if let Some(namespace) = namespace.as_deref()
+        && let Some(slug) = slug.as_deref()
+    {
+        aliases.push(format!("{namespace}/{slug}"));
+    }
+    if let Some(slug) = slug {
+        aliases.push(slug);
+    }
+
+    let repository_url = entry
+        .get("repository")
+        .and_then(|v| v.get("url"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    let attributes = entry
+        .get("attributes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let hosting = attributes
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|attr| attr.starts_with("hosting:"));
+    let remote = matches!(
+        hosting,
+        Some("hosting:remote-capable") | Some("hosting:hybrid")
+    );
+
+    let homepage = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    Some(CatalogProviderRecord {
+        provider: CatalogProvider::Glama,
+        provider_id: id,
+        canonical_name: name.clone(),
+        display_name: name,
+        description: entry
+            .get("description")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        homepage,
+        repository_url,
+        package_manager: None,
+        package_name: None,
+        package_version: None,
+        remote_url: None,
+        remote,
+        aliases,
+    })
+}
+
 fn extract_package_metadata(
     value: Option<&Value>,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -585,16 +720,6 @@ fn dedupe_catalog_records(records: Vec<CatalogProviderRecord>) -> Vec<CatalogSer
 }
 
 fn resolve_catalog_record(record: &CatalogProviderRecord) -> CatalogSourceResolution {
-    if record.provider == CatalogProvider::Glama {
-        return CatalogSourceResolution {
-            status: CatalogSourceResolutionStatus::UnsupportedProvider,
-            kind: None,
-            identity: None,
-            source_url: None,
-            diagnostics: vec!["Provider excluded from exact census.".to_string()],
-        };
-    }
-
     if let Some(repository_url) = record.repository_url.as_deref() {
         return CatalogSourceResolution {
             status: CatalogSourceResolutionStatus::Resolvable,
@@ -764,10 +889,215 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_scope_stays_on_official_and_smithery() {
+    fn default_catalog_scope_includes_all_providers() {
         assert_eq!(
             CatalogSyncOptions::default().providers,
-            vec![CatalogProvider::Official, CatalogProvider::Smithery]
+            vec![
+                CatalogProvider::Official,
+                CatalogProvider::Smithery,
+                CatalogProvider::Glama,
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_glama_record_extracts_fields() {
+        let entry = serde_json::json!({
+            "id": "abc123",
+            "name": "demo-server",
+            "namespace": "acme",
+            "slug": "demo-server",
+            "description": "A demo MCP server",
+            "repository": { "url": "https://github.com/acme/demo-server" },
+            "attributes": ["hosting:local-only"],
+            "url": "https://glama.ai/mcp/servers/abc123",
+            "tools": [],
+            "spdxLicense": { "name": "MIT License", "url": "https://spdx.org/licenses/MIT.json" }
+        });
+        let record = normalize_glama_record(&entry).unwrap();
+        assert_eq!(record.provider, CatalogProvider::Glama);
+        assert_eq!(record.provider_id, "abc123");
+        assert_eq!(record.canonical_name, "demo-server");
+        assert_eq!(record.display_name, "demo-server");
+        assert_eq!(record.description.as_deref(), Some("A demo MCP server"));
+        assert_eq!(
+            record.homepage.as_deref(),
+            Some("https://glama.ai/mcp/servers/abc123")
+        );
+        assert_eq!(
+            record.repository_url.as_deref(),
+            Some("https://github.com/acme/demo-server")
+        );
+        assert!(!record.remote);
+        assert_eq!(record.aliases, vec!["acme/demo-server", "demo-server"]);
+    }
+
+    #[test]
+    fn normalize_glama_record_detects_remote_capable() {
+        let entry = serde_json::json!({
+            "id": "rc1",
+            "name": "remote-mcp",
+            "namespace": "org",
+            "slug": "remote-mcp",
+            "description": "Remote server",
+            "attributes": ["hosting:remote-capable"],
+            "url": "https://glama.ai/mcp/servers/rc1"
+        });
+        let record = normalize_glama_record(&entry).unwrap();
+        assert!(record.remote);
+    }
+
+    #[test]
+    fn normalize_glama_record_detects_hybrid_as_remote() {
+        let entry = serde_json::json!({
+            "id": "h1",
+            "name": "hybrid-mcp",
+            "namespace": "org",
+            "slug": "hybrid-mcp",
+            "description": "Hybrid server",
+            "attributes": ["hosting:hybrid"],
+            "url": "https://glama.ai/mcp/servers/h1"
+        });
+        let record = normalize_glama_record(&entry).unwrap();
+        assert!(record.remote);
+    }
+
+    #[test]
+    fn normalize_glama_record_returns_none_without_id() {
+        let entry = serde_json::json!({
+            "name": "no-id",
+            "namespace": "org",
+            "slug": "no-id"
+        });
+        assert!(normalize_glama_record(&entry).is_none());
+    }
+
+    #[test]
+    fn normalize_glama_record_returns_none_without_name() {
+        let entry = serde_json::json!({
+            "id": "x1",
+            "namespace": "org",
+            "slug": "no-name"
+        });
+        assert!(normalize_glama_record(&entry).is_none());
+    }
+
+    #[test]
+    fn resolve_catalog_record_resolves_glama_with_repository() {
+        let record = CatalogProviderRecord {
+            provider: CatalogProvider::Glama,
+            provider_id: "abc123".to_string(),
+            canonical_name: "demo".to_string(),
+            display_name: "Demo".to_string(),
+            description: None,
+            homepage: Some("https://glama.ai/mcp/servers/abc123".to_string()),
+            repository_url: Some("https://github.com/acme/demo".to_string()),
+            package_manager: None,
+            package_name: None,
+            package_version: None,
+            remote_url: None,
+            remote: false,
+            aliases: vec![],
+        };
+        let resolution = resolve_catalog_record(&record);
+        assert_eq!(resolution.status, CatalogSourceResolutionStatus::Resolvable);
+        assert_eq!(resolution.kind, Some(SourceKind::RepositoryUrl));
+        assert_eq!(
+            resolution.identity.as_deref(),
+            Some("https://github.com/acme/demo")
+        );
+    }
+
+    #[test]
+    fn resolve_catalog_record_marks_glama_remote_only_without_repo() {
+        let record = CatalogProviderRecord {
+            provider: CatalogProvider::Glama,
+            provider_id: "rc1".to_string(),
+            canonical_name: "remote-only".to_string(),
+            display_name: "Remote Only".to_string(),
+            description: None,
+            homepage: None,
+            repository_url: None,
+            package_manager: None,
+            package_name: None,
+            package_version: None,
+            remote_url: None,
+            remote: true,
+            aliases: vec![],
+        };
+        let resolution = resolve_catalog_record(&record);
+        assert_eq!(resolution.status, CatalogSourceResolutionStatus::RemoteOnly);
+    }
+
+    #[test]
+    fn resolve_catalog_record_marks_glama_unresolved_without_repo_or_remote() {
+        let record = CatalogProviderRecord {
+            provider: CatalogProvider::Glama,
+            provider_id: "u1".to_string(),
+            canonical_name: "bare".to_string(),
+            display_name: "Bare".to_string(),
+            description: None,
+            homepage: None,
+            repository_url: None,
+            package_manager: None,
+            package_name: None,
+            package_version: None,
+            remote_url: None,
+            remote: false,
+            aliases: vec![],
+        };
+        let resolution = resolve_catalog_record(&record);
+        assert_eq!(resolution.status, CatalogSourceResolutionStatus::Unresolved);
+    }
+
+    #[test]
+    fn glama_records_participate_in_deduplication() {
+        let glama_record = CatalogProviderRecord {
+            provider: CatalogProvider::Glama,
+            provider_id: "g1".to_string(),
+            canonical_name: "memory".to_string(),
+            display_name: "Memory".to_string(),
+            description: Some("Memory server".to_string()),
+            homepage: None,
+            repository_url: Some("https://github.com/modelcontextprotocol/servers".to_string()),
+            package_manager: None,
+            package_name: None,
+            package_version: None,
+            remote_url: None,
+            remote: false,
+            aliases: vec!["modelcontextprotocol/memory".to_string()],
+        };
+        let official_record = CatalogProviderRecord {
+            provider: CatalogProvider::Official,
+            provider_id: "memory:1.0.0".to_string(),
+            canonical_name: "memory".to_string(),
+            display_name: "Memory".to_string(),
+            description: Some("Shared memory server".to_string()),
+            homepage: None,
+            repository_url: Some("https://github.com/modelcontextprotocol/servers".to_string()),
+            package_manager: Some("npm".to_string()),
+            package_name: Some("@modelcontextprotocol/server-memory".to_string()),
+            package_version: Some("1.0.0".to_string()),
+            remote_url: None,
+            remote: false,
+            aliases: vec![],
+        };
+
+        let servers = dedupe_catalog_records(vec![glama_record, official_record]);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].canonical_name, "memory");
+        assert_eq!(servers[0].provider_records.len(), 2);
+        assert!(
+            servers[0]
+                .provider_records
+                .iter()
+                .any(|r| r.provider == CatalogProvider::Official)
+        );
+        assert!(
+            servers[0]
+                .provider_records
+                .iter()
+                .any(|r| r.provider == CatalogProvider::Glama)
         );
     }
 }
