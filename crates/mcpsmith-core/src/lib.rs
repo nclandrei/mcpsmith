@@ -21,6 +21,7 @@ pub use catalog::{
     CatalogSyncResult, catalog_stats, catalog_sync, load_cached_catalog_sync_result,
     load_catalog_sync_result,
 };
+pub use install::uninstall_server_skills;
 pub use pipeline::{
     ArtifactIdentity, ArtifactKind, EvidenceBundle, HelperScript, MapperFallbackEvidence,
     MapperRelevantFile, MapperRelevantFileRole, PipelineProgressEventKind, PipelineProgressOutcome,
@@ -31,7 +32,7 @@ pub use pipeline::{
     resolve_artifact, review_conversion_bundle, run_pipeline, run_pipeline_with_progress,
     synthesize_from_evidence, verify_conversion_bundle,
 };
-pub use skillset::build_from_bundle;
+pub use skillset::{build_from_bundle, default_agents_skills_dir};
 pub use source::discover_inventory;
 
 const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 240;
@@ -388,6 +389,13 @@ pub struct BuildResult {
     pub generated_at: DateTime<Utc>,
     pub skills_dir: PathBuf,
     pub servers: Vec<BuildServerResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UninstallReport {
+    pub server_name: String,
+    pub server_slug: String,
+    pub removed_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

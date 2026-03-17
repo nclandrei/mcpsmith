@@ -1,9 +1,56 @@
+use crate::{SkillParityManifest, UninstallReport};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+pub fn uninstall_server_skills(skills_dir: &Path, server_slug: &str) -> Result<UninstallReport> {
+    let server_dir = skills_dir.join(server_slug);
+    let manifest_path = server_dir.join(".mcpsmith").join("manifest.json");
+
+    if !manifest_path.exists() {
+        bail!(
+            "No installed skill found for '{}' (expected manifest at {})",
+            server_slug,
+            manifest_path.display()
+        );
+    }
+
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read manifest {}", manifest_path.display()))?;
+    let manifest: SkillParityManifest = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse manifest {}", manifest_path.display()))?;
+
+    let mut removed_paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for tool_skill in &manifest.tool_skills {
+        // skill_file is relative to server_dir, e.g. "../playwright--execute/SKILL.md"
+        let resolved = server_dir.join(&tool_skill.skill_file);
+        if let Some(dir) = resolved.parent() {
+            let dir = dir.to_path_buf();
+            if dir.exists() && seen.insert(dir.clone()) {
+                fs::remove_dir_all(&dir)
+                    .with_context(|| format!("Failed to remove {}", dir.display()))?;
+                removed_paths.push(dir);
+            }
+        }
+    }
+
+    if server_dir.exists() {
+        fs::remove_dir_all(&server_dir)
+            .with_context(|| format!("Failed to remove {}", server_dir.display()))?;
+        removed_paths.push(server_dir);
+    }
+
+    Ok(UninstallReport {
+        server_name: manifest.server_name,
+        server_slug: server_slug.to_string(),
+        removed_paths,
+    })
+}
 
 pub(crate) fn rollback_server_skill_files(orchestrator: &Path, tool_paths: &[PathBuf]) {
     for path in tool_paths {

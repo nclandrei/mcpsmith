@@ -420,7 +420,7 @@ pub(crate) fn sanitize_slug(input: &str) -> String {
     }
 }
 
-pub(crate) fn default_agents_skills_dir() -> PathBuf {
+pub fn default_agents_skills_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
