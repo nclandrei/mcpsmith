@@ -161,6 +161,20 @@ Examples:
   mcpsmith verify --from-bundle .codex-runtime/stages/review-playwright.json --json
 ";
 
+const UNINSTALL_LONG_ABOUT: &str = "\
+Remove previously installed skills for a server.
+
+Reads the parity manifest to identify all skill directories and removes them.
+Does not modify MCP config files.
+";
+
+const UNINSTALL_AFTER_HELP: &str = "\
+Examples:
+  mcpsmith uninstall playwright
+  mcpsmith uninstall playwright --json
+  mcpsmith uninstall playwright --skills-dir /tmp/skills
+";
+
 const RUN_LONG_ABOUT: &str = "\
 Run the full source-grounded pipeline end-to-end.
 
@@ -331,6 +345,17 @@ enum Commands {
         #[arg(long)]
         backend_auto: bool,
     },
+    #[command(long_about = UNINSTALL_LONG_ABOUT, after_help = UNINSTALL_AFTER_HELP)]
+    Uninstall {
+        /// Server slug (directory name under skills dir)
+        server: String,
+        /// Emit machine-readable JSON instead of the default human summary
+        #[arg(long)]
+        json: bool,
+        /// Look for skills in this directory instead of `~/.agents/skills/`
+        #[arg(long = "skills-dir", value_name = "PATH")]
+        skills_dir: Option<PathBuf>,
+    },
     /// Generate shell completions
     #[command(hide = true)]
     Completions {
@@ -490,6 +515,13 @@ fn main() -> anyhow::Result<()> {
                 backend_auto,
                 &app_config,
             )?;
+        }
+        Some(Commands::Uninstall {
+            server,
+            json,
+            skills_dir,
+        }) => {
+            commands::agentic::run_uninstall_cmd(&server, json, skills_dir)?;
         }
         Some(Commands::Completions { shell }) => {
             clap_complete::generate(

@@ -878,6 +878,111 @@ fn test_mcpsmith_bare_one_shot_applies_skills_and_updates_config() {
 }
 
 #[test]
+fn test_mcpsmith_uninstall_removes_installed_skills() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let skills_dir = ctx.skills_dir();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    let run = parse_json_output(
+        &ctx.cmd()
+            .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+            .args(["playwright", "--json", "--backend", "codex", "--config"])
+            .arg(&config_path)
+            .args(["--skills-dir"])
+            .arg(&skills_dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert_eq!(run["status"].as_str().unwrap(), "applied");
+    assert!(ctx.orchestrator_skill_path("playwright").exists());
+    assert!(ctx.tool_skill_path("playwright", "execute").exists());
+
+    ctx.cmd()
+        .args(["uninstall", "playwright", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Uninstalled"))
+        .stdout(predicate::str::contains("removed"));
+
+    assert!(!ctx.orchestrator_skill_path("playwright").exists());
+    assert!(!ctx.tool_skill_path("playwright", "execute").exists());
+    assert!(!ctx.manifest_path("playwright").exists());
+}
+
+#[test]
+fn test_mcpsmith_uninstall_json_returns_structured_report() {
+    let ctx = TestContext::new();
+    let config_path = ctx.config_path();
+    let skills_dir = ctx.skills_dir();
+    let mock_mcp = ctx.path("mock-mcp.sh");
+    let mock_codex = ctx.path("mock-codex.py");
+
+    write_local_source_layout(&ctx, "execute");
+    write_mock_mcp_script(&mock_mcp, &["execute"]);
+    write_mock_codex_script(&mock_codex);
+    write_playwright_config(&ctx, &mock_mcp, Some(true));
+
+    ctx.cmd()
+        .env("MCPSMITH_CODEX_COMMAND", &mock_codex)
+        .args(["playwright", "--json", "--backend", "codex", "--config"])
+        .arg(&config_path)
+        .args(["--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .success();
+
+    let report = parse_json_output(
+        &ctx.cmd()
+            .args(["uninstall", "playwright", "--json", "--skills-dir"])
+            .arg(&skills_dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    assert_eq!(report["server_slug"].as_str().unwrap(), "playwright");
+    assert!(!report["removed_paths"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_mcpsmith_uninstall_nonexistent_server_fails() {
+    let ctx = TestContext::new();
+    let skills_dir = ctx.skills_dir();
+
+    ctx.cmd()
+        .args(["uninstall", "nonexistent", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No installed skill found"));
+}
+
+#[test]
+fn test_mcpsmith_uninstall_help_shows_subcommand() {
+    let ctx = TestContext::new();
+
+    ctx.cmd()
+        .args(["uninstall", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Remove previously installed skills",
+        ))
+        .stdout(predicate::str::contains("--skills-dir"));
+}
+
+#[test]
 fn test_mcpsmith_review_second_pass_applies_revision_before_verify() {
     let ctx = TestContext::new();
     let config_path = ctx.config_path();

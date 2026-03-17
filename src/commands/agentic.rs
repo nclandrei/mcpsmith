@@ -520,6 +520,24 @@ pub fn run_run_cmd(
     Ok(())
 }
 
+pub fn run_uninstall_cmd(server: &str, json: bool, skills_dir: Option<PathBuf>) -> Result<()> {
+    let dir = skills_dir.unwrap_or_else(mcpsmith_core::default_agents_skills_dir);
+    let report = mcpsmith_core::uninstall_server_skills(&dir, server)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Uninstalled {} (removed {} path(s)).",
+            report.server_name,
+            report.removed_paths.len()
+        );
+        for path in &report.removed_paths {
+            println!("  removed: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 pub fn run_overview(json: bool) -> Result<()> {
     if json {
         #[derive(Serialize)]
