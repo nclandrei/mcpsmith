@@ -1139,6 +1139,38 @@ fn test_mcpsmith_catalog_sync_respects_official_registry_limit_cap() {
 }
 
 #[test]
+fn test_mcpsmith_completions_generates_output_for_each_shell() {
+    let ctx = TestContext::new();
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        ctx.cmd()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("mcpsmith"));
+    }
+}
+
+#[test]
+fn test_mcpsmith_completions_rejects_invalid_shell() {
+    let ctx = TestContext::new();
+    ctx.cmd()
+        .args(["completions", "nushell"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn test_mcpsmith_completions_is_hidden_from_help() {
+    let ctx = TestContext::new();
+    ctx.cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completions").not());
+}
+
+#[test]
 fn test_mcpsmith_catalog_sync_defaults_to_all_three_providers() {
     let ctx = TestContext::new();
     let registry = StubRegistryServer::start();
