@@ -447,3 +447,17 @@ pub(crate) struct ConfigSource {
 pub(crate) struct BackendContext {
     pub selection: BackendSelection,
 }
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, OnceLock};
+
+    /// Shared lock for tests that modify backend-related environment variables
+    /// (`MCPSMITH_CODEX_COMMAND`, `MCPSMITH_CLAUDE_COMMAND`, `MCPSMITH_CODEX_HOME`,
+    /// `MCPSMITH_CLAUDE_HOME`). All such tests must hold this lock to prevent
+    /// concurrent env-var mutations from causing flaky failures.
+    pub fn backend_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+}

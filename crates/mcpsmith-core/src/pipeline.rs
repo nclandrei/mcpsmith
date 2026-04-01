@@ -2752,16 +2752,11 @@ fn url_encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::backend_env_lock;
     use crate::{ConversionRecommendation, PermissionLevel, SourceGrounding};
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
-
-    fn backend_command_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn write_executable_script(path: &Path, body: &str) {
         fs::write(path, body).unwrap();
@@ -3517,7 +3512,7 @@ const clickSummary = "click click click";"#,
 
     #[test]
     fn synthesize_from_evidence_retries_primary_backend_for_each_tool() {
-        let _guard = backend_command_env_lock().lock().unwrap();
+        let _guard = backend_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let codex_script = dir.path().join("fake-codex.sh");
         let claude_script = dir.path().join("fake-claude.sh");
@@ -3582,9 +3577,16 @@ esac
 "#,
         );
 
+        // Point MCPSMITH_CODEX_HOME to a minimal stub so the health check
+        // copies from here instead of the real ~/.codex (which may contain
+        // broken symlinks that make the codex backend appear unavailable).
+        let codex_home = tempfile::tempdir().unwrap();
+        fs::write(codex_home.path().join("auth.json"), "{}").unwrap();
+
         unsafe {
             std::env::set_var("MCPSMITH_CODEX_COMMAND", &codex_script);
             std::env::set_var("MCPSMITH_CLAUDE_COMMAND", &claude_script);
+            std::env::set_var("MCPSMITH_CODEX_HOME", codex_home.path());
         }
 
         let evidence = sample_evidence_bundle(
@@ -3613,6 +3615,7 @@ esac
         unsafe {
             std::env::remove_var("MCPSMITH_CODEX_COMMAND");
             std::env::remove_var("MCPSMITH_CLAUDE_COMMAND");
+            std::env::remove_var("MCPSMITH_CODEX_HOME");
         }
     }
 }

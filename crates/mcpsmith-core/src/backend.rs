@@ -1330,12 +1330,8 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
 
-    fn backend_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_env::backend_env_lock;
 
     #[test]
     fn clipped_tail_preview_keeps_end_of_text() {
@@ -1438,6 +1434,7 @@ mod tests {
 
     #[test]
     fn codex_structured_invocation_skips_git_repo_trust_check() {
+        let _guard = backend_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().expect("backend tempdir");
         let script_path = dir.path().join("fake-codex.sh");
         fs::write(
@@ -1476,6 +1473,14 @@ printf '%s' '{"ok":true}' > "$output_path"
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
             .expect("chmod fake codex");
 
+        // Use a minimal stub home so the backend does not try to copy from the
+        // real ~/.codex (which may contain broken symlinks).
+        let codex_home = tempfile::tempdir().expect("codex home tempdir");
+        fs::write(codex_home.path().join("auth.json"), "{}").expect("write auth stub");
+        unsafe {
+            std::env::set_var("MCPSMITH_CODEX_HOME", codex_home.path());
+        }
+
         let result = invoke_codex_structured_with_timeout(
             script_path.to_string_lossy().as_ref(),
             "ignored prompt",
@@ -1486,5 +1491,9 @@ printf '%s' '{"ok":true}' > "$output_path"
         .expect("codex invocation should succeed");
 
         assert_eq!(result, r#"{"ok":true}"#);
+
+        unsafe {
+            std::env::remove_var("MCPSMITH_CODEX_HOME");
+        }
     }
 }
