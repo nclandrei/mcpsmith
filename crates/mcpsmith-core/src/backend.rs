@@ -206,7 +206,7 @@ pub(crate) fn synthesize_tool_conversion_with_backend(
     let backend = backend_by_name(backend_name, timeout_seconds);
     let raw = backend.explain_tool_chunk(
         &build_tool_synthesis_prompt(server, evidence),
-        &tool_synthesis_schema(),
+        &tool_synthesis_schema()?,
     )?;
     let parsed: BackendSkillSynthesisResponse =
         serde_json::from_str(raw.trim()).with_context(|| {
@@ -237,7 +237,7 @@ pub(crate) fn review_tool_conversion_with_backend(
     let backend = backend_by_name(backend_name, timeout_seconds);
     let raw = backend.explain_tool_chunk(
         &build_tool_review_prompt(server, evidence, draft),
-        &tool_review_schema(),
+        &tool_review_schema()?,
     )?;
     serde_json::from_str(raw.trim()).with_context(|| {
         format!(
@@ -257,7 +257,7 @@ pub(crate) fn map_low_confidence_tool_with_backend(
     let backend = backend_by_name(backend_name, timeout_seconds);
     let raw = backend.explain_tool_chunk(
         &build_tool_mapper_prompt(server, evidence, candidates),
-        &tool_mapper_schema(),
+        &tool_mapper_schema()?,
     )?;
     let parsed: BackendMapperResponse = serde_json::from_str(raw.trim()).with_context(|| {
         format!(
@@ -418,7 +418,7 @@ If not, set approved=false, provide findings, and include revised_draft with fix
     )
 }
 
-fn tool_mapper_schema() -> String {
+fn tool_mapper_schema() -> Result<String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "type": "object",
         "additionalProperties": false,
@@ -443,10 +443,10 @@ fn tool_mapper_schema() -> String {
             }
         }
     }))
-    .expect("mapper schema should serialize")
+    .context("failed to serialize mapper schema")
 }
 
-fn tool_synthesis_schema() -> String {
+fn tool_synthesis_schema() -> Result<String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "type": "object",
         "additionalProperties": false,
@@ -539,10 +539,10 @@ fn tool_synthesis_schema() -> String {
             }
         }
     }))
-    .expect("synthesis schema should serialize")
+    .context("failed to serialize synthesis schema")
 }
 
-fn tool_review_schema() -> String {
+fn tool_review_schema() -> Result<String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "type": "object",
         "additionalProperties": false,
@@ -658,7 +658,7 @@ fn tool_review_schema() -> String {
             }
         }
     }))
-    .expect("review schema should serialize")
+    .context("failed to serialize review schema")
 }
 
 trait AgentBackend {

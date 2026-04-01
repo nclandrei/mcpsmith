@@ -130,7 +130,7 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
         }
     }
 
-    let mut servers = merge_discovered_servers(servers);
+    let mut servers = merge_discovered_servers(servers)?;
     servers.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(ConvertInventory {
@@ -140,7 +140,7 @@ pub(crate) fn discover_from_sources(sources: &[ConfigSource]) -> Result<ConvertI
     })
 }
 
-fn merge_discovered_servers(servers: Vec<MCPServerProfile>) -> Vec<MCPServerProfile> {
+fn merge_discovered_servers(servers: Vec<MCPServerProfile>) -> Result<Vec<MCPServerProfile>> {
     let mut grouped = BTreeMap::<String, Vec<MCPServerProfile>>::new();
     for server in servers {
         grouped
@@ -152,13 +152,13 @@ fn merge_discovered_servers(servers: Vec<MCPServerProfile>) -> Vec<MCPServerProf
     let mut merged = grouped
         .into_values()
         .map(|group| merge_server_group(&group))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     assign_logical_ids(&mut merged);
-    merged
+    Ok(merged)
 }
 
-fn merge_server_group(group: &[MCPServerProfile]) -> MCPServerProfile {
-    let mut merged = select_representative_server(group).clone();
+fn merge_server_group(group: &[MCPServerProfile]) -> Result<MCPServerProfile> {
+    let mut merged = select_representative_server(group)?.clone();
     let primary_name = select_primary_name(group);
     let config_refs = merge_config_refs(group);
     let primary_ref = config_refs
@@ -203,7 +203,7 @@ fn merge_server_group(group: &[MCPServerProfile]) -> MCPServerProfile {
     merged.recommendation = recommendation;
     merged.recommendation_reason = recommendation_reason;
     merged.config_refs = config_refs;
-    merged
+    Ok(merged)
 }
 
 fn assign_logical_ids(servers: &mut [MCPServerProfile]) {
@@ -233,7 +233,7 @@ fn assign_logical_ids(servers: &mut [MCPServerProfile]) {
     }
 }
 
-fn select_representative_server(group: &[MCPServerProfile]) -> &MCPServerProfile {
+fn select_representative_server(group: &[MCPServerProfile]) -> Result<&MCPServerProfile> {
     group
         .iter()
         .max_by_key(|server| {
@@ -245,7 +245,7 @@ fn select_representative_server(group: &[MCPServerProfile]) -> &MCPServerProfile
                 server.id.clone(),
             )
         })
-        .expect("server group should not be empty")
+        .context("server group should not be empty")
 }
 
 fn select_primary_name(group: &[MCPServerProfile]) -> String {
