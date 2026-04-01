@@ -81,7 +81,7 @@ fn default_convert_backend_timeout_seconds() -> u64 {
 }
 
 fn default_convert_backend_chunk_size() -> usize {
-    8
+    4
 }
 
 fn default_convert_probe_timeout_seconds() -> u64 {
