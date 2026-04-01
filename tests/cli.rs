@@ -1464,3 +1464,59 @@ fn test_mcpsmith_catalog_sync_defaults_to_all_three_providers() {
         0
     );
 }
+
+#[test]
+fn test_mcpsmith_uninstall_nonexistent_server_with_existing_skills_dir() {
+    let ctx = TestContext::new();
+    let skills_dir = ctx.skills_dir();
+
+    // Create the skills directory with a different server installed
+    fs::create_dir_all(skills_dir.join("other-server").join(".mcpsmith")).unwrap();
+    fs::write(
+        skills_dir
+            .join("other-server")
+            .join(".mcpsmith")
+            .join("manifest.json"),
+        r#"{"server_name":"other-server","server_slug":"other-server","tool_skills":[]}"#,
+    )
+    .unwrap();
+
+    ctx.cmd()
+        .args(["uninstall", "nonexistent", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No installed skill found"));
+
+    // Verify the other server's files are untouched
+    assert!(skills_dir.join("other-server").exists());
+}
+
+#[test]
+fn test_mcpsmith_uninstall_missing_skills_dir_fails() {
+    let ctx = TestContext::new();
+    let skills_dir = ctx.path("nonexistent-skills-dir");
+
+    // The directory does not exist at all
+    assert!(!skills_dir.exists());
+
+    ctx.cmd()
+        .args(["uninstall", "playwright", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No installed skill found"));
+}
+
+#[test]
+fn test_mcpsmith_uninstall_nonexistent_server_json_returns_error() {
+    let ctx = TestContext::new();
+    let skills_dir = ctx.skills_dir();
+
+    ctx.cmd()
+        .args(["uninstall", "nonexistent", "--json", "--skills-dir"])
+        .arg(&skills_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No installed skill found"));
+}
