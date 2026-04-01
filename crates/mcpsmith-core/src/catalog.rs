@@ -8,8 +8,19 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Base URL for the official MCP registry (modelcontextprotocol.io).
+/// Can be overridden at runtime via the `MCPSMITH_OFFICIAL_REGISTRY_BASE_URL`
+/// environment variable, primarily for testing against local or staging registries.
 const OFFICIAL_REGISTRY_BASE: &str = "https://registry.modelcontextprotocol.io/v0.1";
+
+/// Base URL for the Smithery MCP registry.
+/// Can be overridden at runtime via the `MCPSMITH_SMITHERY_REGISTRY_BASE_URL`
+/// environment variable.
 const SMITHERY_REGISTRY_BASE: &str = "https://registry.smithery.ai";
+
+/// Base URL for the Glama MCP registry.
+/// Can be overridden at runtime via the `MCPSMITH_GLAMA_REGISTRY_BASE_URL`
+/// environment variable.
 const GLAMA_REGISTRY_BASE: &str = "https://glama.ai/api/mcp/v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

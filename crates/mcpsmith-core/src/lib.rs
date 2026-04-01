@@ -35,7 +35,16 @@ pub use pipeline::{
 pub use skillset::{build_from_bundle, default_agents_skills_dir};
 pub use source::discover_inventory;
 
+/// Default per-invocation timeout (in seconds) for backend calls (synthesis,
+/// review, mapper). Each backend call that exceeds this duration is terminated.
+/// 240 seconds accommodates large tool evidence bundles while preventing
+/// runaway processes from blocking the pipeline indefinitely.
 const DEFAULT_BACKEND_TIMEOUT_SECONDS: u64 = 240;
+
+/// Default number of tools processed per backend batch during synthesis and
+/// review stages. Smaller chunks reduce peak memory and prompt size per backend
+/// call; larger chunks reduce round-trip overhead. The value 4 balances
+/// throughput with prompt budget constraints.
 const DEFAULT_BACKEND_CHUNK_SIZE: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

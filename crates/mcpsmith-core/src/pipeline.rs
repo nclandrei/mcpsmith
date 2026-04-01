@@ -31,9 +31,31 @@ use tar::Archive;
 use walkdir::{DirEntry, WalkDir};
 use zip::ZipArchive;
 
+/// Maximum number of supporting source-code snippets collected per tool during
+/// evidence extraction. Keeps the evidence bundle concise enough for the
+/// synthesis backend while still providing sufficient context. Setting this too
+/// high bloats the prompt sent to the backend; too low risks missing important
+/// implementation details.
 const MAX_SUPPORTING_SNIPPETS: usize = 4;
+
+/// Maximum number of test and documentation snippets collected per tool during
+/// evidence extraction. Test snippets illustrate expected usage patterns, while
+/// doc snippets provide API-level context. The same limit applies to both
+/// categories. A lower cap keeps backend prompts focused; a higher cap may
+/// introduce noise from tangentially related tests.
 const MAX_TEST_SNIPPETS: usize = 3;
+
+/// Maximum number of source-file candidates sent to the mapper fallback when
+/// deterministic evidence extraction yields low confidence. Limiting candidates
+/// controls the size of the mapper prompt and prevents the backend from being
+/// overwhelmed by irrelevant files. Only the top-scoring matches are included.
 const MAX_MAPPER_CANDIDATES: usize = 6;
+
+/// Confidence score below which a tool's evidence is considered insufficient and
+/// the mapper fallback is triggered. Tools at or above this threshold proceed
+/// directly to synthesis. The value 0.60 was chosen to catch tools where
+/// deterministic extraction found a registration but could not locate a clear
+/// handler implementation.
 const LOW_CONFIDENCE_THRESHOLD: f32 = 0.60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

@@ -21,6 +21,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
+/// Reasoning effort level passed to the Codex backend. Using "low" keeps
+/// backend latency and cost down for structured extraction tasks (synthesis,
+/// review, mapper) where the prompt already provides strong grounding context.
 const CODEX_REASONING_EFFORT_LOW: &str = "low";
 
 pub(crate) fn clipped_preview(input: &str, max_chars: usize) -> String {
